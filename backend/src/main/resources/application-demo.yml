@@ -1,0 +1,21 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:poolguard;MODE=PostgreSQL;DB_CLOSE_DELAY=-1
+    username: sa
+    password: ''
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+  flyway:
+    enabled: false
+poolguard:
+  demo: true
+  scheduler:
+    enabled: false
+management:
+  health:
+    redis:
+      enabled: false
+server:
+  address: 127.0.0.1

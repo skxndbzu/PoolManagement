@@ -1,0 +1,66 @@
+server:
+  port: ${SERVER_PORT:8090}
+  forward-headers-strategy: framework
+
+spring:
+  application:
+    name: poolguard-control-plane
+  autoconfigure:
+    exclude: org.springframework.boot.autoconfigure.security.servlet.UserDetailsServiceAutoConfiguration
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://127.0.0.1:5432/poolguard}
+    username: ${DATABASE_USERNAME:poolguard}
+    password: ${DATABASE_PASSWORD:poolguard}
+    hikari:
+      maximum-pool-size: ${DATABASE_POOL_SIZE:15}
+      minimum-idle: 2
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: Asia/Shanghai
+  flyway:
+    enabled: true
+    baseline-on-migrate: false
+  data:
+    redis:
+      repositories:
+        enabled: false
+      url: ${REDIS_URL:redis://127.0.0.1:6379}
+  jackson:
+    default-property-inclusion: non_null
+
+poolguard:
+  auth:
+    username: ${POOLGUARD_ADMIN_USERNAME:admin}
+    password: ${POOLGUARD_ADMIN_PASSWORD:pool-admin}
+    token-ttl: ${POOLGUARD_TOKEN_TTL:PT8H}
+  scheduler:
+    tick-ms: ${POOLGUARD_SCHEDULER_TICK_MS:30000}
+    enabled: ${POOLGUARD_SCHEDULER_ENABLED:true}
+  adapters:
+    sub2api:
+      base-url: ${SUB2API_BASE_URL:http://127.0.0.1:8081}
+      internal-token: ${SUB2API_ADMIN_API_KEY:${SUB2API_INTERNAL_TOKEN:}}
+      model: ${SUB2API_TEST_MODEL:gpt-5.2}
+    codex-proxy-rs:
+      base-url: ${CODEX_PROXY_BASE_URL:http://127.0.0.1:8080}
+      internal-token: ${CODEX_PROXY_ADMIN_API_KEY:${CODEX_PROXY_INTERNAL_TOKEN:}}
+      model: ${CODEX_PROXY_TEST_MODEL:gpt-5.2}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+logging:
+  level:
+    com.poolguard: INFO

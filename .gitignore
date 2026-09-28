@@ -1,0 +1,12 @@
+backend/target/
+backend/.runtime/
+.env
+*.local.ps1
+
+# Local credentials and developer artifacts
+.env.*
+!.env.example
+*.log
+*.pid
+.idea/
+.vscode/
