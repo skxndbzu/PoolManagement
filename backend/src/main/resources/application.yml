@@ -34,6 +34,8 @@ spring:
     default-property-inclusion: non_null
 
 poolguard:
+  detection:
+    disable-failures: ${POOLGUARD_DISABLE_FAILURES:2}
   auth:
     username: ${POOLGUARD_ADMIN_USERNAME:admin}
     password: ${POOLGUARD_ADMIN_PASSWORD:pool-admin}
@@ -62,5 +64,17 @@ management:
         enabled: true
 
 logging:
+  charset:
+    console: UTF-8
+    file: UTF-8
+  file:
+    name: ${POOLGUARD_LOG_FILE:./logs/poolguard.log}
+  pattern:
+    dateformat: "yyyy-MM-dd HH:mm:ss.SSS,Asia/Shanghai"
+  logback:
+    rollingpolicy:
+      max-file-size: 10MB
+      max-history: 7
+      total-size-cap: 100MB
   level:
     com.poolguard: INFO

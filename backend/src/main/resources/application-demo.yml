@@ -11,6 +11,8 @@ spring:
     enabled: false
 poolguard:
   demo: true
+  detection:
+    disable-failures: 1
   scheduler:
     enabled: false
 management:

@@ -49,6 +49,9 @@ public class AccountService {
                 }
                 default -> throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"不支持的账号动作");
             }
+            account.setGuardOperationId(null); account.setFailStreak(0);
+            org.slf4j.LoggerFactory.getLogger(getClass()).info("[人工操作] project={} account={} email={} action={}",
+                account.getProjectCode(), account.getExternalAccountId(), account.getEmailMasked(), request.action());
             return toResponse(repository.save(account));
         }
     }

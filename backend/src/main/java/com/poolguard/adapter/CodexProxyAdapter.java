@@ -19,7 +19,41 @@ public class CodexProxyAdapter extends AbstractHttpProjectAdapter {
     }
     @Override protected int successCode() { return 200; }
     public String projectCode() { return "codex-proxy-rs"; }
-    public String capability() { return "暂不支持能力检测：当前 codex-proxy-rs 仅支持固定题目连通测试，需扩展定向答题接口"; }
+    public String capability() { return "支持自定义题目、停用账号复检及隔离回执；需部署 CPR PoolGuard 扩展"; }
+    @Override public Answer ask(String id, String model, String question) {
+        long started = System.nanoTime();
+        var data = json(HttpMethod.POST, "/api/admin/accounts/poolguard/probe",
+            Map.of("accountId", id, "model", model, "prompt", question));
+        String text = data.path("text").asText("");
+        String version = data.path("controlVersion").asText("");
+        if (!id.equals(data.path("accountId").asText()) || !model.equals(data.path("model").asText())
+                || !data.path("completed").asBoolean(false) || text.isBlank() || !version.matches("[0-9]+"))
+            throw new AdapterException("CPR 答题未完整完成或账号、模型、控制版本不匹配");
+        return new Answer(text, (int) Math.min(Integer.MAX_VALUE, (System.nanoTime()-started)/1_000_000), version);
+    }
+    @Override public boolean supportsIsolationReceipts() { return true; }
+    @Override public IsolationState isolationState(String id, String operationId) {
+        return control(id, operationId, "inspect", null);
+    }
+    @Override public void isolate(String id, String operationId, String controlVersion) {
+        if (controlVersion == null) throw new AdapterException("CPR 答题缺少控制版本，不能自动禁用");
+        if (control(id, operationId, "disable", controlVersion) != IsolationState.ISOLATED)
+            throw new ControlConflictException("CPR 未确认本次自动隔离的归属");
+    }
+    @Override public void restoreIsolation(String id, String operationId) {
+        if (control(id, operationId, "restore", null) != IsolationState.RESTORED)
+            throw new ControlConflictException("CPR 未确认本次隔离已恢复");
+    }
+    private IsolationState control(String id, String operationId, String action, String version) {
+        var body = new HashMap<String, Object>();
+        body.put("accountId", id); body.put("operationId", operationId); body.put("action", action);
+        if (version != null) body.put("expectedControlVersion", version);
+        var data = json(HttpMethod.POST, "/api/admin/accounts/poolguard/control", body);
+        if (!id.equals(data.path("accountId").asText()) || !operationId.equals(data.path("operationId").asText()))
+            throw new AdapterException("CPR 隔离回执与请求不匹配");
+        try { return IsolationState.valueOf(data.path("state").asText().toUpperCase(Locale.ROOT)); }
+        catch (IllegalArgumentException e) { throw new AdapterException("CPR 隔离回执状态无效"); }
+    }
     public List<ExternalAccount> listAccounts() {
         var accounts = new ArrayList<ExternalAccount>();
         var seen = new HashSet<String>();

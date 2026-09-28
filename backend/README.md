@@ -3,7 +3,7 @@
 ## 两种运行模式
 
 - `demo`：H2 内存数据库、内存登录会话、模拟项目适配器。不会访问真实项目；每次重启清空数据。
-- `live`（或默认 profile）：PostgreSQL + Redis，两个真实管理 API 适配器。账号同步、调度开关已实现；自定义题目检测仍受目标项目接口限制，会记录 ERROR 而不修改远端调度开关。
+- `live`（或默认 profile）：PostgreSQL + Redis，两个真实管理 API 适配器。CPR 部署 [PoolGuard 扩展](../integrations/cpr/README.md)后支持自定义题目与自动隔离恢复；sub2api 仍记录能力检测不支持。
 
 Java 服务同时提供页面和 API。构建会把根目录的 `index.html`、`app.js`、`styles.css` 打入 JAR；修改页面后需重新构建。
 
@@ -17,7 +17,7 @@ mvn package
 
 ## 复用 PostgreSQL / Redis
 
-在已有 PostgreSQL 实例上创建独立数据库和账号 `poolguard`，授予该库内建表和迁移权限。Flyway 在该库运行 V1、V2。不要使用任一目标项目的业务数据库。V1 曾包含固定演示账号，V2 将它们标记为不参与监测，并停用旧的含糊评分题目；保留旧检测历史。
+在已有 PostgreSQL 实例上创建独立数据库和账号 `poolguard`，授予该库内建表和迁移权限。Flyway 在该库运行 V1–V3。不要使用任一目标项目的业务数据库。迁移保留旧检测历史，停用遗留演示账号与含糊评分题目，并保存自动隔离回执、失败计数和题库版本指纹。
 
 Redis 可以复用已有实例，建议指定独立 logical database。PoolGuard 会话 key 使用 `poolguard:session:` 前缀。
 
@@ -49,11 +49,11 @@ $env:CODEX_PROXY_TEST_MODEL = 'gpt-5.2'
 - 同一时刻最多一个批次，账号逐个检测。大号池的执行时间可能超过设定周期，不会叠加重复批次；需要按真实规模进一步增加受控账号并发。
 - 成功同步的项目才进入当次检测，完整目录中消失的账号不再监测；同步失败保留旧目录并报告错误。
 - 全部启用题目通过：正常账号保留；自动隔离账号累计连续通过次数，达到配置阈值才恢复调度。
-- 答错：标记 `DEGRADED`，隔离并继续复检。恢复观察 `RECOVERING` 期间仍然隔离。
+- 答错：连续失败达到 `POOLGUARD_DISABLE_FAILURES`（默认 2）后自动隔离并标记 `DEGRADED`。阈值前只记录疑似降智；恢复观察 `RECOVERING` 期间仍然隔离。演示模式默认 1 轮失败隔离。题目、答案或模型改变会重置连续次数。
 - 超时、鉴权失败、接口不支持：记录 `ERROR`，不作为答错、不触发隔离，连续通过计数清零。
 - 手工停用：`DISABLED` 且停止监测；只能手工恢复。源项目同步时已停用的账号不取得自动恢复所有权。
 - 远端状态回写失败不会伪装为成功；保留失败原因并让批次显示异常。
-- 当前跨系统没有原子事务或远端所有权标记。同一账号在源项目被管理员并发改动时无法完整辨认操作归属，正式自动化上线前需扩展幂等/版本条件与隔离所有权协议。
+- CPR 自动隔离在发送前持久化操作 UUID，远端启停与审计回执在同一事务提交。重启、请求超时后查询回执；人工启停导致归属冲突时暂停自动管控。回执遵循 CPR 审计保留期；粗粒度批量启停可能保守地使其他账号的回执失效。sub2api 的普通启停没有此协议，自动答题仍未开放。
 
 新进程下次拿到任务锁时会将上次遗留的 RUNNING 批次标记中断，下轮重新检测。生产数据库保存结果，异步任务本身不是持久队列。
 
@@ -101,12 +101,12 @@ P99
 | 项目 | 查询 / 调度 | 自定义答题 |
 | --- | --- | --- |
 | sub2api | `GET /api/v1/admin/accounts`；`POST /api/v1/admin/accounts/{id}/schedulable` | 当前部分测试分支忽略 `prompt`，尚未接入 |
-| codex-proxy-rs | `GET /api/admin/accounts`；`POST /api/admin/accounts/batch-update`，只提交 `accountIds` 和 `enabled`；详情回读确认 | `connection-test` 固定题目，尚未接入 |
+| codex-proxy-rs | 查询与人工启停沿用原接口；自动启停使用 `POST /api/admin/accounts/poolguard/control` | `POST /api/admin/accounts/poolguard/probe`，固定账号、完整回答、停用可复检 |
 
-两者使用 `x-api-key`，响应业务码分别为 0 与 200。Java 接口 `ProjectAdapter.ask(externalId, model, question)` 是尚待实现的真实答题入口；必须精确指定账号、允许隔离状态下探测、返回实际完整回答且不触发自动恢复。不能直接复用普通轮询路由或把 SSE 的连接成功作为答题正确。
+两者使用 `x-api-key`，响应业务码分别为 0 与 200。CPR 的 `ProjectAdapter.ask(externalId, model, question)` 已接入扩展；回答缺失完成标记、账号／模型不匹配、缺失控制版本、空回答或 HTTP 错误均记录 ERROR，不触发隔离。标准答案仅用于本地判分。
 
-本轮没有修改两个目标项目。codex-proxy-rs 的 CONTRIBUTING.md 要求 Rust 开发使用 rust-best-practices 技能，但当前本机未找到，因此未开展 Rust 接口扩展。
+默认日志为 `logs/poolguard.log`（从启动脚本运行时位于 `backend/logs/`），可通过 `POOLGUARD_LOG_FILE` 调整。使用北京时间，记录逐题失败、自动禁用、恢复观察、重新启用及异常对账；每文件 10 MB、保留 7 天、总量 100 MB。日志不包含密钥或完整上游响应。
 
 ## 验证
 
-`mvn test` 覆盖判分边界、管理 API 协议、登录/退出/配置/策略接口、模拟隔离恢复流程、异常保护和并发互斥。H2 及 HTTP 模拟服务器测试不替代 PostgreSQL Flyway 迁移、Redis 和两个真实项目的端到端联调；当前环境没有这些服务，后者尚未验证。
+`mvn test` 覆盖判分边界、管理 API 协议、登录/退出/配置/策略接口、模拟隔离恢复流程、异常保护和并发互斥。H2 及 HTTP 模拟服务器测试不替代 PostgreSQL Flyway 迁移、Redis 和真实模型账号的端到端联调。CPR 的隔离事务测试需配置独立测试数据库 `CPR_TEST_DATABASE_URL`；不能使用生产账号库。

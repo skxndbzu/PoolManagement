@@ -8,5 +8,6 @@ backend/.runtime/
 !.env.example
 *.log
 *.pid
+logs/
 .idea/
 .vscode/

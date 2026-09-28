@@ -36,9 +36,40 @@ class AdapterContractTest {
             adapter.setSchedulable("acct_1",false);
             assertThat(new ObjectMapper().readTree(bodies.get(0)).size()).isEqualTo(2);
             assertThat(headers).containsOnly("test-key");
-            int before=requests.get();
-            assertThatThrownBy(()->adapter.ask("acct_1","test-model","question")).isInstanceOf(AdapterException.class).hasMessageContaining("固定题目");
-            assertThat(requests.get()).isEqualTo(before);
+        } finally { server.stop(0); }
+    }
+    @Test void cprProbeRequiresCompleteAnswerAndControlReceipt() throws Exception {
+        var mapper=new ObjectMapper();
+        var response=new java.util.concurrent.atomic.AtomicReference<String>("{\"accountId\":\"acct_1\",\"model\":\"test-model\",\"text\":\"408\",\"completed\":true,\"controlVersion\":\"12\"}");
+        var status=new AtomicInteger(200);
+        var bodies=new java.util.concurrent.CopyOnWriteArrayList<com.fasterxml.jackson.databind.JsonNode>();
+        var server=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
+        server.createContext("/api/admin/accounts/poolguard/", exchange->{
+            bodies.add(mapper.readTree(exchange.getRequestBody()));
+            byte[] bytes=("{\"code\":"+status.get()+",\"data\":"+response.get()+"}").getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type","application/json"); exchange.sendResponseHeaders(status.get(),bytes.length);
+            exchange.getResponseBody().write(bytes);exchange.close();
+        });server.start();
+        try {
+            var adapter=new CodexProxyAdapter(mapper,"http://127.0.0.1:"+server.getAddress().getPort(),"test-key",true,"test-model");
+            assertThat(adapter.ask("acct_1","test-model","17 × 24，仅返回数字").text()).isEqualTo("408");
+            assertThat(bodies.get(0).size()).isEqualTo(3);
+            assertThat(bodies.get(0).path("prompt").asText()).isEqualTo("17 × 24，仅返回数字");
+            for(String field:java.util.List.of("accountId","model","completed","text","controlVersion")) {
+                var broken=(com.fasterxml.jackson.databind.node.ObjectNode)mapper.readTree("{\"accountId\":\"acct_1\",\"model\":\"test-model\",\"text\":\"408\",\"completed\":true,\"controlVersion\":\"12\"}");
+                broken.remove(field);response.set(broken.toString());
+                assertThatThrownBy(()->adapter.ask("acct_1","test-model","question")).isInstanceOf(AdapterException.class);
+            }
+            String operation=java.util.UUID.randomUUID().toString();
+            response.set("{\"accountId\":\"acct_1\",\"operationId\":\""+operation+"\",\"state\":\"isolated\"}");
+            adapter.isolate("acct_1",operation,"12");
+            assertThat(bodies.get(bodies.size()-1).path("expectedControlVersion").asText()).isEqualTo("12");
+            response.set("{\"accountId\":\"acct_1\",\"operationId\":\""+operation+"\",\"state\":\"restored\"}");
+            adapter.restoreIsolation("acct_1",operation);
+            status.set(409);
+            assertThatThrownBy(()->adapter.restoreIsolation("acct_1",operation)).isInstanceOf(ControlConflictException.class);
+            status.set(404);
+            assertThatThrownBy(()->adapter.ask("acct_1","test-model","question")).hasMessageContaining("HTTP 404");
         } finally { server.stop(0); }
     }
     @Test void unavailableAdaptersNeverPerformNetworkCalls() {

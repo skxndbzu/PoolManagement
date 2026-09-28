@@ -1,0 +1,2 @@
+# Preserve replayable Git patch bytes and its whitespace-only context lines.
+integrations/cpr/*.patch -text -whitespace

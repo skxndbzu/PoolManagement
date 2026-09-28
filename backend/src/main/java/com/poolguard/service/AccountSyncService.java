@@ -32,7 +32,7 @@ public class AccountSyncService {
                     account.setModel(item.model());
                     account.setSourcePresent(true);
                     // 外部手工停用的账号不取得自动恢复所有权。
-                    if (!item.schedulable() && !account.getDisabledByGuard()) {
+                    if (!item.schedulable() && !account.getDisabledByGuard() && account.getGuardOperationId() == null) {
                         account.setMonitoring(false); account.setStatus(AccountStatus.DISABLED);
                     }
                     accounts.save(account);

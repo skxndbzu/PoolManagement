@@ -16,7 +16,7 @@ import static org.assertj.core.api.Assertions.*;
 import static org.awaitility.Awaitility.*;
 import static org.mockito.Mockito.*;
 
-@SpringBootTest
+@SpringBootTest(properties="poolguard.detection.disable-failures=1")
 @ActiveProfiles("demo")
 class DetectionLifecycleTest {
     @Autowired DetectionService detection;

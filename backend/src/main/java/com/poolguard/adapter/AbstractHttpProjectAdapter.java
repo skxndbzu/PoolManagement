@@ -38,6 +38,8 @@ abstract class AbstractHttpProjectAdapter implements ProjectAdapter {
                 throw new AdapterException(projectCode() + " 管理接口响应格式无效");
             return root.get("data");
         } catch (RestClientResponseException e) {
+            if (e.getStatusCode().value() == 409)
+                throw new ControlConflictException(projectCode() + " 账号控制版本冲突，自动管控已暂停");
             throw new AdapterException(projectCode() + " 管理接口 HTTP " + e.getStatusCode().value());
         } catch (AdapterException e) { throw e;
         } catch (Exception e) { throw new AdapterException(projectCode() + " 连接失败或超时"); }

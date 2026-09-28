@@ -87,6 +87,16 @@ public class ManagedAccount {
     @Builder.Default
     private Integer passStreak = 0;
 
+    @Column(name = "fail_streak", nullable = false)
+    @Builder.Default
+    private Integer failStreak = 0;
+
+    @Column(name = "guard_operation_id", length = 36)
+    private String guardOperationId;
+
+    @Column(name = "evaluation_fingerprint", length = 64)
+    private String evaluationFingerprint;
+
     @PrePersist
     void beforeInsert() {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);

@@ -1,0 +1,1124 @@
+diff --git a/backend/crates/gateway-admin/src/model/mod.rs b/backend/crates/gateway-admin/src/model/mod.rs
+index bbefdba2..53ceaa5b 100644
+--- a/backend/crates/gateway-admin/src/model/mod.rs
++++ b/backend/crates/gateway-admin/src/model/mod.rs
+@@ -14,6 +14,7 @@ pub mod observability;
+ pub mod plugin_client_keys;
+ pub mod plugin_resources;
+ pub mod plugins;
++pub mod poolguard;
+ pub mod pricing;
+ pub mod provider_credentials;
+ pub mod proxies;
+diff --git a/backend/crates/gateway-admin/src/model/poolguard.rs b/backend/crates/gateway-admin/src/model/poolguard.rs
+new file mode 100644
+index 00000000..2f91e9a6
+--- /dev/null
++++ b/backend/crates/gateway-admin/src/model/poolguard.rs
+@@ -0,0 +1,46 @@
++//! PoolGuard 的定向答题与可重试隔离合同，不持有题库或评分规则。
++
++use gateway_core::{account::ProviderAccountId, routing::UpstreamModelId};
++use uuid::Uuid;
++
++use super::Revision;
++
++pub struct PoolGuardProbe {
++    pub account_id: ProviderAccountId,
++    pub model: UpstreamModelId,
++    pub prompt: String,
++}
++
++pub struct PoolGuardAnswer {
++    pub text: String,
++    pub control_version: u64,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum PoolGuardAction {
++    Inspect,
++    Disable,
++    Restore,
++}
++
++pub struct PoolGuardControl {
++    pub account_id: ProviderAccountId,
++    pub operation_id: Uuid,
++    pub action: PoolGuardAction,
++    pub expected_control_version: Option<u64>,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum PoolGuardIsolation {
++    None,
++    Isolated,
++    Restored,
++    Conflict,
++}
++
++pub struct PoolGuardStatus {
++    pub config_revision: Revision,
++    pub control_version: u64,
++    pub enabled: bool,
++    pub state: PoolGuardIsolation,
++}
+diff --git a/backend/crates/gateway-admin/src/ports/store.rs b/backend/crates/gateway-admin/src/ports/store.rs
+index 8db74596..d4a681cf 100644
+--- a/backend/crates/gateway-admin/src/ports/store.rs
++++ b/backend/crates/gateway-admin/src/ports/store.rs
+@@ -90,6 +90,17 @@ pub type AdminStoreResult<T> = Result<T, AdminStoreError>;
+ /// 账号目录与公共账号写操作。
+ #[async_trait]
+ pub trait AccountStore: Send + Sync {
++    async fn poolguard_control(
++        &self,
++        _command: crate::model::poolguard::PoolGuardControl,
++        _context: &MutationContext,
++    ) -> AdminStoreResult<crate::model::poolguard::PoolGuardStatus> {
++        Err(AdminStoreError::new(
++            AdminStoreErrorKind::Unavailable,
++            "poolguard",
++            "isolation store unavailable",
++        ))
++    }
+     /// 插件回调按授权 Provider/账号在数据库过滤后做稳定 cursor 分页。
+     async fn list_plugin_accounts(
+         &self,
+diff --git a/backend/crates/gateway-admin/src/use_case/accounts.rs b/backend/crates/gateway-admin/src/use_case/accounts.rs
+index 5830222e..66baba72 100644
+--- a/backend/crates/gateway-admin/src/use_case/accounts.rs
++++ b/backend/crates/gateway-admin/src/use_case/accounts.rs
+@@ -52,6 +52,20 @@ const CONNECTION_TEST_INPUT: &str = "Reply with exactly OK.";
+ /// 统一账号页消费的服务。
+ #[async_trait]
+ pub trait AccountsService: Send + Sync {
++    async fn poolguard_probe(
++        &self,
++        _request: crate::model::poolguard::PoolGuardProbe,
++    ) -> Result<crate::model::poolguard::PoolGuardAnswer, AdminError> {
++        Err(AdminError::unavailable("PoolGuard 探测未接入"))
++    }
++
++    async fn poolguard_control(
++        &self,
++        _context: &MutationContext,
++        _command: crate::model::poolguard::PoolGuardControl,
++    ) -> Result<crate::model::poolguard::PoolGuardStatus, AdminError> {
++        Err(AdminError::unavailable("PoolGuard 隔离控制未接入"))
++    }
+     async fn list(&self, query: AccountListQuery) -> Result<AccountDirectoryPage, AdminError>;
+ 
+     async fn export(
+@@ -381,6 +395,35 @@ impl DefaultAccountsService {
+ 
+ #[async_trait]
+ impl AccountsService for DefaultAccountsService {
++    async fn poolguard_probe(
++        &self,
++        request: crate::model::poolguard::PoolGuardProbe,
++    ) -> Result<crate::model::poolguard::PoolGuardAnswer, AdminError> {
++        let (_, provider) = self.provider_for_account(&request.account_id).await?;
++        super::poolguard::probe(
++            self.accounts.as_ref(),
++            self.probe.as_ref(),
++            provider.as_ref(),
++            request,
++        )
++        .await
++    }
++
++    async fn poolguard_control(
++        &self,
++        context: &MutationContext,
++        command: crate::model::poolguard::PoolGuardControl,
++    ) -> Result<crate::model::poolguard::PoolGuardStatus, AdminError> {
++        let (_, provider) = self.provider_for_account(&command.account_id).await?;
++        super::poolguard::control(
++            self.accounts.as_ref(),
++            self.snapshot.as_ref(),
++            provider.as_ref(),
++            context,
++            command,
++        )
++        .await
++    }
+     async fn list(&self, query: AccountListQuery) -> Result<AccountDirectoryPage, AdminError> {
+         let providers = &self.providers;
+         let runtime = self
+diff --git a/backend/crates/gateway-admin/src/use_case/mod.rs b/backend/crates/gateway-admin/src/use_case/mod.rs
+index ebca86ab..d3926de0 100644
+--- a/backend/crates/gateway-admin/src/use_case/mod.rs
++++ b/backend/crates/gateway-admin/src/use_case/mod.rs
+@@ -15,6 +15,7 @@ pub mod plugin_client_keys;
+ pub mod plugin_resources;
+ pub(crate) mod plugin_update;
+ pub mod plugins;
++pub(crate) mod poolguard;
+ pub mod proxies;
+ pub mod settings;
+ pub mod system;
+diff --git a/backend/crates/gateway-admin/src/use_case/poolguard.rs b/backend/crates/gateway-admin/src/use_case/poolguard.rs
+new file mode 100644
+index 00000000..8b83173f
+--- /dev/null
++++ b/backend/crates/gateway-admin/src/use_case/poolguard.rs
+@@ -0,0 +1,110 @@
++//! 隔离的 PoolGuard 用例；复用诊断执行、账号事务、Provider 通知及配置发布。
++
++use super::{map_provider_error, map_store_error, publish_committed};
++use crate::{
++    model::{
++        AdminError, MutationActor, MutationContext,
++        poolguard::{
++            PoolGuardAction, PoolGuardAnswer, PoolGuardControl, PoolGuardProbe, PoolGuardStatus,
++        },
++    },
++    ports::{provider::ProviderAdmin, store::AccountStore},
++};
++use gateway_core::{
++    engine::probe::{AccountProbe, AccountProbeRequest},
++    runtime::SnapshotControl,
++};
++use std::time::Duration;
++use uuid::Uuid;
++
++pub(super) async fn probe(
++    accounts: &dyn AccountStore,
++    probe: &dyn AccountProbe,
++    provider: &dyn ProviderAdmin,
++    request: PoolGuardProbe,
++) -> Result<PoolGuardAnswer, AdminError> {
++    if request.prompt.trim().is_empty() || request.prompt.len() > 16 * 1024 {
++        return Err(AdminError::invalid("题目必须为 1–16384 字节"));
++    }
++    // 答题前冻结控制版本；期间的人工启停会使后续自动禁用发生冲突。
++    let before = accounts
++        .poolguard_control(
++            PoolGuardControl {
++                account_id: request.account_id.clone(),
++                operation_id: Uuid::nil(),
++                action: PoolGuardAction::Inspect,
++                expected_control_version: None,
++            },
++            &MutationContext {
++                actor: MutationActor::System,
++                request_id: "poolguard-probe".to_owned(),
++            },
++        )
++        .await
++        .map_err(|error| map_store_error(error, "poolguard control version"))?;
++    let operation = provider
++        .connection_test_operation(&request.model, &request.prompt)
++        .await
++        .map_err(|error| map_provider_error(error, "poolguard probe"))?;
++    let result = tokio::time::timeout(
++        Duration::from_secs(45),
++        probe.probe(
++            AccountProbeRequest {
++                account_id: request.account_id,
++                provider_kind: provider.provider_kind().clone(),
++                upstream_model: request.model,
++                operation,
++            },
++            None,
++        ),
++    )
++    .await
++    .map_err(|_| AdminError::bad_gateway("账号答题超时，不能作为能力不达标"))?
++    .map_err(|error| {
++        tracing::warn!(source = ?error.source(), kind = ?error.kind(), "PoolGuard 账号答题异常");
++        AdminError::bad_gateway("账号答题失败，不能作为能力不达标")
++    })?;
++    let size = result
++        .text
++        .iter()
++        .try_fold(0usize, |size, text| size.checked_add(text.len()))
++        .filter(|size| *size <= 64 * 1024)
++        .ok_or_else(|| AdminError::bad_gateway("账号回答超过检测长度限制"))?;
++    let mut text = String::with_capacity(size);
++    for part in result.text {
++        text.push_str(&part);
++    }
++    if text.trim().is_empty() {
++        return Err(AdminError::bad_gateway("账号未返回完整文本答案"));
++    }
++    Ok(PoolGuardAnswer {
++        text,
++        control_version: before.control_version,
++    })
++}
++
++pub(super) async fn control(
++    accounts: &dyn AccountStore,
++    snapshot: &dyn SnapshotControl,
++    provider: &dyn ProviderAdmin,
++    context: &MutationContext,
++    command: PoolGuardControl,
++) -> Result<PoolGuardStatus, AdminError> {
++    let action = command.action;
++    let account_id = command.account_id.clone();
++    let result = accounts
++        .poolguard_control(command, context)
++        .await
++        .map_err(|error| map_store_error(error, "poolguard isolation"))?;
++    if action != PoolGuardAction::Inspect {
++        if !result.enabled {
++            provider.account_unavailable(&account_id).await;
++        }
++        provider
++            .account_facts_changed(std::slice::from_ref(&account_id))
++            .await;
++        // 幂等重试也发布：上次提交后进程可能尚未来得及通知运行时。
++        publish_committed(snapshot, result.config_revision).await?;
++    }
++    Ok(result)
++}
+diff --git a/backend/crates/gateway-admin/tests/use_case/accounts.rs b/backend/crates/gateway-admin/tests/use_case/accounts.rs
+index f03a2e64..6ee8a862 100644
+--- a/backend/crates/gateway-admin/tests/use_case/accounts.rs
++++ b/backend/crates/gateway-admin/tests/use_case/accounts.rs
+@@ -686,6 +686,25 @@ impl FakeAccountStore {
+ 
+ #[async_trait]
+ impl AccountStore for FakeAccountStore {
++    async fn poolguard_control(
++        &self,
++        command: gateway_admin::model::poolguard::PoolGuardControl,
++        _: &MutationContext,
++    ) -> AdminStoreResult<gateway_admin::model::poolguard::PoolGuardStatus> {
++        use gateway_admin::model::poolguard::*;
++        assert_eq!(command.action, PoolGuardAction::Inspect);
++        let accounts = self.accounts.lock().unwrap();
++        let account = accounts
++            .iter()
++            .find(|account| account.id == command.account_id.as_str())
++            .unwrap();
++        Ok(PoolGuardStatus {
++            config_revision: revision(1),
++            control_version: 7,
++            enabled: account.enabled,
++            state: PoolGuardIsolation::None,
++        })
++    }
+     async fn list_plugin_accounts(
+         &self,
+         _: gateway_admin::model::provider_credentials::PluginAccountListQuery,
+@@ -3279,7 +3298,7 @@ async fn accounts_service(
+     accounts_service_with_probe(provider, store, Arc::new(SuccessfulAccountProbe)).await
+ }
+ 
+-async fn accounts_service_with_probe(
++pub(super) async fn accounts_service_with_probe(
+     provider: Arc<FakeProviderAdmin>,
+     store: Arc<FakeAccountStore>,
+     probe: Arc<dyn AccountProbe>,
+diff --git a/backend/crates/gateway-admin/tests/use_case/mod.rs b/backend/crates/gateway-admin/tests/use_case/mod.rs
+index 670b069a..9da9a510 100644
+--- a/backend/crates/gateway-admin/tests/use_case/mod.rs
++++ b/backend/crates/gateway-admin/tests/use_case/mod.rs
+@@ -10,6 +10,7 @@ mod import_tasks;
+ mod observability;
+ mod plugin_update;
+ mod plugins;
++mod poolguard;
+ mod proxies;
+ mod settings;
+ mod system;
+diff --git a/backend/crates/gateway-admin/tests/use_case/poolguard.rs b/backend/crates/gateway-admin/tests/use_case/poolguard.rs
+new file mode 100644
+index 00000000..a1fc290e
+--- /dev/null
++++ b/backend/crates/gateway-admin/tests/use_case/poolguard.rs
+@@ -0,0 +1,85 @@
++use super::accounts::{
++    FakeAccountStore, FakeProviderAdmin, account_record, accounts_service_with_probe, events,
++};
++use futures::future::BoxFuture;
++use gateway_admin::model::{AdminErrorKind, poolguard::PoolGuardProbe};
++use gateway_core::{
++    account::ProviderAccountId,
++    engine::probe::{AccountProbe, AccountProbeError, AccountProbeRequest, AccountProbeResult},
++    error::{GatewayError, GatewayErrorKind},
++    operation::Operation,
++    routing::{RuntimeSnapshot, UpstreamModelId},
++};
++use std::sync::Arc;
++
++struct AnswerProbe {
++    answer: Option<String>,
++}
++impl AccountProbe for AnswerProbe {
++    fn probe(
++        &self,
++        request: AccountProbeRequest,
++        _: Option<Arc<RuntimeSnapshot>>,
++    ) -> BoxFuture<'_, Result<AccountProbeResult, AccountProbeError>> {
++        assert_eq!(request.account_id.as_str(), "acct_test");
++        assert_eq!(request.upstream_model.as_str(), "test-model");
++        let Operation::Generate(operation) = request.operation else {
++            panic!("expected generation");
++        };
++        assert_eq!(
++            operation.protocol_payload().body()["input"],
++            "17 * 24? Return digits only."
++        );
++        assert!(!operation.protocol_payload().body().contains_key("answer"));
++        Box::pin(async {
++            match &self.answer {
++                Some(answer) => Ok(AccountProbeResult {
++                    text: vec![answer.clone()],
++                }),
++                None => Err(GatewayError::new(GatewayErrorKind::RateLimited, "limited").into()),
++            }
++        })
++    }
++}
++
++#[tokio::test]
++async fn poolguard_custom_prompt_targets_disabled_account_and_returns_complete_answer() {
++    let provider = FakeProviderAdmin::new("openai", events());
++    let mut account = account_record("openai");
++    account.enabled = false;
++    let store = FakeAccountStore::with_account(account, events());
++    let services = accounts_service_with_probe(
++        provider,
++        store,
++        Arc::new(AnswerProbe {
++            answer: Some("408".to_owned()),
++        }),
++    )
++    .await;
++    let result = services
++        .accounts()
++        .poolguard_probe(request())
++        .await
++        .unwrap();
++    assert_eq!(result.text, "408");
++    assert_eq!(result.control_version, 7);
++}
++
++#[tokio::test]
++async fn poolguard_empty_and_failed_answers_are_errors_not_incorrect_answers() {
++    for answer in [None, Some(String::new()), Some("x".repeat(65537))] {
++        let provider = FakeProviderAdmin::new("openai", events());
++        let store = FakeAccountStore::new("openai", events());
++        let services =
++            accounts_service_with_probe(provider, store, Arc::new(AnswerProbe { answer })).await;
++        let result = services.accounts().poolguard_probe(request()).await;
++        assert!(matches!(result,Err(error) if error.kind()==AdminErrorKind::BadGateway));
++    }
++}
++fn request() -> PoolGuardProbe {
++    PoolGuardProbe {
++        account_id: ProviderAccountId::new("acct_test").unwrap(),
++        model: UpstreamModelId::new("test-model").unwrap(),
++        prompt: "17 * 24? Return digits only.".to_owned(),
++    }
++}
+diff --git a/backend/crates/gateway-api/src/admin/accounts/handlers.rs b/backend/crates/gateway-api/src/admin/accounts/handlers.rs
+index 0c0a546f..428cc74f 100644
+--- a/backend/crates/gateway-api/src/admin/accounts/handlers.rs
++++ b/backend/crates/gateway-api/src/admin/accounts/handlers.rs
+@@ -10,6 +10,7 @@ where
+     S: SessionState + Clone + Send + Sync + 'static,
+ {
+     Router::new()
++        .merge(super::poolguard::router::<S>())
+         .merge(super::import_tasks::router::<S>())
+         .route("/api/admin/accounts", get(list_accounts::<S>))
+         .route("/api/admin/accounts/detail", get(account_detail::<S>))
+diff --git a/backend/crates/gateway-api/src/admin/accounts/mod.rs b/backend/crates/gateway-api/src/admin/accounts/mod.rs
+index 8fc3cdd0..eb341509 100644
+--- a/backend/crates/gateway-api/src/admin/accounts/mod.rs
++++ b/backend/crates/gateway-api/src/admin/accounts/mod.rs
+@@ -64,6 +64,7 @@ const MAX_AVATAR_VERSION_BYTES: usize = 32;
+ mod credentials;
+ mod handlers;
+ mod import_tasks;
++mod poolguard;
+ mod presenter;
+ mod wire;
+ 
+diff --git a/backend/crates/gateway-api/src/admin/accounts/poolguard.rs b/backend/crates/gateway-api/src/admin/accounts/poolguard.rs
+new file mode 100644
+index 00000000..e85e5fd8
+--- /dev/null
++++ b/backend/crates/gateway-api/src/admin/accounts/poolguard.rs
+@@ -0,0 +1,140 @@
++//! PoolGuard 专用管理入口；保留原有 GET connection-test 的固定题目合同。
++
++use super::{
++    AdminAuth, AdminEnvelope, AdminError, AdminJson, AdminResponse, WireValidationError,
++    map_service_error, map_wire_error, require_account_id,
++};
++use crate::auth::SessionState;
++use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
++use gateway_admin::model::poolguard::{
++    PoolGuardAction, PoolGuardControl, PoolGuardIsolation, PoolGuardProbe,
++};
++use gateway_core::{account::ProviderAccountId, routing::UpstreamModelId};
++use serde::Deserialize;
++use uuid::Uuid;
++
++pub(super) fn router<S>() -> Router<S>
++where
++    S: SessionState + Clone + Send + Sync + 'static,
++{
++    Router::new()
++        .route("/api/admin/accounts/poolguard/probe", post(probe::<S>))
++        .route("/api/admin/accounts/poolguard/control", post(control::<S>))
++}
++
++#[derive(Deserialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++struct ProbeRequest {
++    account_id: String,
++    model: String,
++    prompt: String,
++}
++
++async fn probe<S>(
++    _auth: AdminAuth,
++    State(state): State<S>,
++    AdminJson(input): AdminJson<ProbeRequest>,
++) -> Result<impl IntoResponse, AdminError>
++where
++    S: SessionState + Send + Sync,
++{
++    require_account_id(&input.account_id, "accountId").map_err(map_wire_error)?;
++    if input.model.trim().is_empty()
++        || input.model.len() > 256
++        || input.model.chars().any(char::is_control)
++    {
++        return Err(map_wire_error(WireValidationError::new("model")));
++    }
++    if input.prompt.trim().is_empty() || input.prompt.len() > 16 * 1024 {
++        return Err(map_wire_error(WireValidationError::new("prompt")));
++    }
++    let answer = state
++        .admin_services()
++        .accounts()
++        .poolguard_probe(PoolGuardProbe {
++            account_id: ProviderAccountId::new(input.account_id.clone())
++                .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?,
++            model: UpstreamModelId::new(input.model.clone())
++                .map_err(|_| map_wire_error(WireValidationError::new("model")))?,
++            prompt: input.prompt,
++        })
++        .await
++        .map_err(map_service_error)?;
++    Ok(AdminResponse::new(
++        StatusCode::OK,
++        AdminEnvelope::ok(serde_json::json!({
++            "accountId": input.account_id, "model": input.model, "text": answer.text,
++            "completed": true, "controlVersion": answer.control_version.to_string(),
++        })),
++    ))
++}
++
++#[derive(Deserialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++struct ControlRequest {
++    account_id: String,
++    operation_id: String,
++    action: String,
++    expected_control_version: Option<String>,
++}
++
++async fn control<S>(
++    auth: AdminAuth,
++    State(state): State<S>,
++    AdminJson(input): AdminJson<ControlRequest>,
++) -> Result<impl IntoResponse, AdminError>
++where
++    S: SessionState + Send + Sync,
++{
++    require_account_id(&input.account_id, "accountId").map_err(map_wire_error)?;
++    let operation_id = Uuid::parse_str(&input.operation_id)
++        .map_err(|_| map_wire_error(WireValidationError::new("operationId")))?;
++    if operation_id.is_nil() {
++        return Err(map_wire_error(WireValidationError::new("operationId")));
++    }
++    let action = match input.action.as_str() {
++        "inspect" => PoolGuardAction::Inspect,
++        "disable" => PoolGuardAction::Disable,
++        "restore" => PoolGuardAction::Restore,
++        _ => return Err(map_wire_error(WireValidationError::new("action"))),
++    };
++    let expected = input
++        .expected_control_version
++        .as_deref()
++        .map(str::parse::<u64>)
++        .transpose()
++        .map_err(|_| map_wire_error(WireValidationError::new("expectedControlVersion")))?;
++    if (action == PoolGuardAction::Disable) != expected.is_some() {
++        return Err(map_wire_error(WireValidationError::new(
++            "expectedControlVersion",
++        )));
++    }
++    let result = state
++        .admin_services()
++        .accounts()
++        .poolguard_control(
++            &auth.context().mutation_context(),
++            PoolGuardControl {
++                account_id: ProviderAccountId::new(input.account_id.clone())
++                    .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?,
++                operation_id,
++                action,
++                expected_control_version: expected,
++            },
++        )
++        .await
++        .map_err(map_service_error)?;
++    let isolation = match result.state {
++        PoolGuardIsolation::None => "none",
++        PoolGuardIsolation::Isolated => "isolated",
++        PoolGuardIsolation::Restored => "restored",
++        PoolGuardIsolation::Conflict => "conflict",
++    };
++    Ok(AdminResponse::new(
++        StatusCode::OK,
++        AdminEnvelope::ok(serde_json::json!({
++            "accountId": input.account_id, "operationId": input.operation_id, "state": isolation,
++            "enabled": result.enabled, "controlVersion": result.control_version.to_string(),
++        })),
++    ))
++}
+diff --git a/backend/crates/gateway-api/tests/admin/accounts/mod.rs b/backend/crates/gateway-api/tests/admin/accounts/mod.rs
+index c42fa648..0ec1a080 100644
+--- a/backend/crates/gateway-api/tests/admin/accounts/mod.rs
++++ b/backend/crates/gateway-api/tests/admin/accounts/mod.rs
+@@ -1,5 +1,6 @@
+ mod handlers;
+ mod import_tasks;
++mod poolguard;
+ mod presenter;
+ 
+ mod personal_info {
+diff --git a/backend/crates/gateway-api/tests/admin/accounts/poolguard.rs b/backend/crates/gateway-api/tests/admin/accounts/poolguard.rs
+new file mode 100644
+index 00000000..88b32e23
+--- /dev/null
++++ b/backend/crates/gateway-api/tests/admin/accounts/poolguard.rs
+@@ -0,0 +1,73 @@
++use super::super::{AdminTestFixture, AdminTestState};
++use axum::{
++    body::Body,
++    http::{Request, StatusCode, header},
++};
++use gateway_api::admin;
++use tower::ServiceExt as _;
++
++#[tokio::test]
++async fn poolguard_routes_require_admin_and_validate_before_execution() {
++    let fixture = AdminTestFixture::new().await;
++    fixture.auth.insert_session("guard-session");
++    for (route, body, authenticated, expected) in [
++        (
++            "probe",
++            serde_json::json!({"accountId":"acct_test","model":"test-model","prompt":"question"}),
++            false,
++            StatusCode::UNAUTHORIZED,
++        ),
++        (
++            "probe",
++            serde_json::json!({"accountId":"acct_test","model":"test-model","prompt":""}),
++            true,
++            StatusCode::BAD_REQUEST,
++        ),
++        (
++            "probe",
++            serde_json::json!({"accountId":"acct_test","model":"test-model","prompt":"question","answer":"secret"}),
++            true,
++            StatusCode::UNPROCESSABLE_ENTITY,
++        ),
++        (
++            "probe",
++            serde_json::json!({"accountId":"acct_test","model":"test-model","prompt":"question"}),
++            true,
++            StatusCode::SERVICE_UNAVAILABLE,
++        ),
++        (
++            "control",
++            serde_json::json!({"accountId":"acct_test","operationId":"bad","action":"restore"}),
++            true,
++            StatusCode::BAD_REQUEST,
++        ),
++        (
++            "control",
++            serde_json::json!({"accountId":"acct_test","operationId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","action":"disable"}),
++            true,
++            StatusCode::BAD_REQUEST,
++        ),
++        (
++            "control",
++            serde_json::json!({"accountId":"acct_test","operationId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","action":"restore"}),
++            true,
++            StatusCode::SERVICE_UNAVAILABLE,
++        ),
++    ] {
++        let mut request = Request::builder()
++            .method("POST")
++            .uri(format!("/api/admin/accounts/poolguard/{route}"))
++            .header("x-request-id", "poolguard-api-test")
++            .header(header::CONTENT_TYPE, "application/json");
++        if authenticated {
++            request = request.header(header::COOKIE, "cpr_session=guard-session");
++        }
++        let response = admin::router::<AdminTestState>()
++            .with_state(fixture.state())
++            .oneshot(request.body(Body::from(body.to_string())).unwrap())
++            .await
++            .unwrap();
++        assert_eq!(response.status(), expected, "route={route} body={body}");
++        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
++    }
++}
+diff --git a/backend/crates/gateway-api/tests/architecture.rs b/backend/crates/gateway-api/tests/architecture.rs
+index 987c6fca..2204a10e 100644
+--- a/backend/crates/gateway-api/tests/architecture.rs
++++ b/backend/crates/gateway-api/tests/architecture.rs
+@@ -38,6 +38,7 @@ fn source_tree_should_match_frozen_machine_manifest() {
+         "src/admin/accounts/handlers.rs",
+         "src/admin/accounts/import_tasks.rs",
+         "src/admin/accounts/mod.rs",
++        "src/admin/accounts/poolguard.rs",
+         "src/admin/accounts/presenter.rs",
+         "src/admin/accounts/wire.rs",
+         "src/admin/auth.rs",
+@@ -110,6 +111,7 @@ fn test_tree_should_match_frozen_rust_mirror() {
+         "tests/admin/accounts/handlers.rs",
+         "tests/admin/accounts/import_tasks.rs",
+         "tests/admin/accounts/mod.rs",
++        "tests/admin/accounts/poolguard.rs",
+         "tests/admin/accounts/presenter.rs",
+         "tests/admin/auth.rs",
+         "tests/admin/client_keys.rs",
+diff --git a/backend/crates/gateway-store/src/postgres/provider_accounts/admin_adapter.rs b/backend/crates/gateway-store/src/postgres/provider_accounts/admin_adapter.rs
+index e0fa013f..ce468bed 100644
+--- a/backend/crates/gateway-store/src/postgres/provider_accounts/admin_adapter.rs
++++ b/backend/crates/gateway-store/src/postgres/provider_accounts/admin_adapter.rs
+@@ -310,6 +310,13 @@ impl PgAdminAccountStore {
+ 
+ #[async_trait]
+ impl AccountStore for PgAdminAccountStore {
++    async fn poolguard_control(
++        &self,
++        command: gateway_admin::model::poolguard::PoolGuardControl,
++        context: &MutationContext,
++    ) -> AdminStoreResult<gateway_admin::model::poolguard::PoolGuardStatus> {
++        super::poolguard::control(&self.pool, command, context).await
++    }
+     async fn list_plugin_accounts(
+         &self,
+         query: PluginAccountListQuery,
+diff --git a/backend/crates/gateway-store/src/postgres/provider_accounts/mod.rs b/backend/crates/gateway-store/src/postgres/provider_accounts/mod.rs
+index b29d2d07..6efde676 100644
+--- a/backend/crates/gateway-store/src/postgres/provider_accounts/mod.rs
++++ b/backend/crates/gateway-store/src/postgres/provider_accounts/mod.rs
+@@ -63,6 +63,7 @@ mod admin_queries;
+ mod authorization;
+ mod core_adapter;
+ mod mapping;
++mod poolguard;
+ mod quota_forecast;
+ mod repository;
+ mod rows;
+diff --git a/backend/crates/gateway-store/src/postgres/provider_accounts/poolguard.rs b/backend/crates/gateway-store/src/postgres/provider_accounts/poolguard.rs
+new file mode 100644
+index 00000000..a72427ba
+--- /dev/null
++++ b/backend/crates/gateway-store/src/postgres/provider_accounts/poolguard.rs
+@@ -0,0 +1,99 @@
++//! 复用管理审计作为隔离回执，不占用官方数据库迁移编号或修改账号 schema。
++//!
++//! 审计保留期届满或粗粒度批量启停使归属无法确认时停止自动恢复。
++//! 与现有管理事务统一先锁 runtime_settings，再锁账号，避免人工操作竞态。
++
++use super::{
++    AdminStoreResult, MutationContext, PgPool, Revision, StoreError, StoreResult, admin_revision,
++    admin_store_error, append_admin_audit_event_in_transaction,
++    bump_config_revision_in_transaction, mutation_audit, postgres_unavailable,
++};
++use gateway_admin::model::poolguard::{
++    PoolGuardAction, PoolGuardControl, PoolGuardIsolation, PoolGuardStatus,
++};
++
++pub(super) async fn control(
++    pool: &PgPool,
++    command: PoolGuardControl,
++    context: &MutationContext,
++) -> AdminStoreResult<PoolGuardStatus> {
++    let mut tx = pool.begin().await.map_err(|_| {
++        admin_store_error("poolguard", postgres_unavailable("begin poolguard control"))
++    })?;
++    let result: StoreResult<PoolGuardStatus> = async {
++        let config: i64 = sqlx::query_scalar("select config_revision from runtime_settings where id = 1 for update")
++            .fetch_one(&mut *tx).await.map_err(|_| postgres_unavailable("lock poolguard control"))?;
++        let id = command.account_id.as_str();
++        let (enabled, provider): (bool, String) = sqlx::query_as(
++            "select enabled, provider_kind from provider_accounts where id = $1 for update")
++            .bind(id).fetch_optional(&mut *tx).await
++            .map_err(|_| postgres_unavailable("read poolguard account"))?
++            .ok_or_else(|| StoreError::NotFound { entity: "provider account", id: id.to_owned() })?;
++        // 批量接口不保存逐账号列表，保守地把同 Provider 导入及批量启停也当作版本变化。
++        let version: i64 = sqlx::query_scalar(
++            "select coalesce(max(config_revision), 0) from admin_audit_events
++             where entity_kind = 'provider_account' and entity_ref = any($1)
++               and ('enabled' = any(changed_fields) or action = 'recover')")
++            .bind(vec![id, "provider_accounts", provider.as_str()])
++            .fetch_one(&mut *tx).await.map_err(|_| postgres_unavailable("read account control version"))?;
++        let disable_id = format!("poolguard:{}:disable", command.operation_id);
++        let restore_id = format!("poolguard:{}:restore", command.operation_id);
++        let receipts: Vec<(String, String, i64)> = sqlx::query_as(
++            "select id, entity_ref, config_revision from admin_audit_events where id = any($1)")
++            .bind(vec![&disable_id, &restore_id]).fetch_all(&mut *tx).await
++            .map_err(|_| postgres_unavailable("read poolguard receipt"))?;
++        if receipts.iter().any(|(_, account, _)| account != id) { return Err(conflict(id)); }
++        let disabled_at = receipts.iter().find(|(event, _, _)| event == &disable_id).map(|(_, _, revision)| *revision);
++        let restored_at = receipts.iter().find(|(event, _, _)| event == &restore_id).map(|(_, _, revision)| *revision);
++        let state = if restored_at.is_some_and(|revision| revision == version) && enabled {
++            PoolGuardIsolation::Restored
++        } else if restored_at.is_none() && disabled_at.is_some_and(|revision| revision == version) && !enabled {
++            PoolGuardIsolation::Isolated
++        } else if disabled_at.is_none() && restored_at.is_none() && enabled {
++            PoolGuardIsolation::None
++        } else { PoolGuardIsolation::Conflict };
++        let mut status = PoolGuardStatus {
++            config_revision: admin_revision(revision(config)?).map_err(|_| postgres_unavailable("invalid control revision"))?,
++            control_version: u64::try_from(version).map_err(|_| postgres_unavailable("invalid account version"))?,
++            enabled, state,
++        };
++        let target = match (command.action, state) {
++            (PoolGuardAction::Inspect, _) |
++            (PoolGuardAction::Disable, PoolGuardIsolation::Isolated) |
++            (PoolGuardAction::Restore, PoolGuardIsolation::Restored) => return Ok(status),
++            (PoolGuardAction::Disable, PoolGuardIsolation::None)
++                if command.expected_control_version == Some(status.control_version) => false,
++            (PoolGuardAction::Restore, PoolGuardIsolation::Isolated) => true,
++            _ => return Err(conflict(id)),
++        };
++        if command.operation_id.is_nil() { return Err(conflict(id)); }
++        let committed = bump_config_revision_in_transaction(&mut tx).await?;
++        sqlx::query("update provider_accounts set enabled = $2, updated_at = greatest(now(), updated_at) where id = $1")
++            .bind(id).bind(target).execute(&mut *tx).await
++            .map_err(|_| postgres_unavailable("write poolguard enabled state"))?;
++        let mut audit = mutation_audit(context, if target {"poolguard.restore"} else {"poolguard.disable"},
++            "provider_account", id, vec!["enabled".to_owned()]);
++        audit.id = if target { restore_id } else { disable_id };
++        append_admin_audit_event_in_transaction(&mut tx, audit, committed).await?;
++        status.config_revision = admin_revision(committed).map_err(|_| postgres_unavailable("invalid committed revision"))?;
++        status.control_version = committed.get(); status.enabled = target;
++        status.state = if target { PoolGuardIsolation::Restored } else { PoolGuardIsolation::Isolated };
++        Ok(status)
++    }.await;
++    super::repository::finish_admin_transaction(tx, result, "poolguard account control")
++        .await
++        .map_err(|error| admin_store_error("poolguard", error))
++}
++
++fn conflict(id: &str) -> StoreError {
++    StoreError::Conflict {
++        entity: "poolguard isolation",
++        id: id.to_owned(),
++        kind: crate::ConflictKind::StaleRevision,
++    }
++}
++fn revision(value: i64) -> StoreResult<Revision> {
++    Revision::new(
++        u64::try_from(value).map_err(|_| postgres_unavailable("invalid configuration revision"))?,
++    )
++}
+diff --git a/backend/crates/gateway-store/tests/postgres/provider_accounts/mod.rs b/backend/crates/gateway-store/tests/postgres/provider_accounts/mod.rs
+index 980b03ec..60ac62b7 100644
+--- a/backend/crates/gateway-store/tests/postgres/provider_accounts/mod.rs
++++ b/backend/crates/gateway-store/tests/postgres/provider_accounts/mod.rs
+@@ -6,6 +6,7 @@ use std::{
+ 
+ mod admin_adapter;
+ mod authorization;
++mod poolguard;
+ mod quota_forecast;
+ mod timestamps;
+ 
+diff --git a/backend/crates/gateway-store/tests/postgres/provider_accounts/poolguard.rs b/backend/crates/gateway-store/tests/postgres/provider_accounts/poolguard.rs
+new file mode 100644
+index 00000000..6b765c2f
+--- /dev/null
++++ b/backend/crates/gateway-store/tests/postgres/provider_accounts/poolguard.rs
+@@ -0,0 +1,213 @@
++use super::*;
++use gateway_admin::model::poolguard::*;
++use uuid::Uuid;
++
++fn command(
++    id: &str,
++    operation: Uuid,
++    action: PoolGuardAction,
++    version: Option<u64>,
++) -> PoolGuardControl {
++    PoolGuardControl {
++        account_id: ProviderAccountId::new(id).unwrap(),
++        operation_id: operation,
++        action,
++        expected_control_version: version,
++    }
++}
++
++#[tokio::test]
++async fn poolguard_receipts_are_idempotent_and_manual_disable_prevents_restore() {
++    let Some(db) = TestDatabase::create("poolguard_receipts").await else {
++        return;
++    };
++    let repo = PgProviderAccountRepository::new(db.pool.clone());
++    repo.insert_provider_account(account("acct_guard", "guard-user"))
++        .await
++        .unwrap();
++    let store = admin_account_store(&db.pool);
++    let context = MutationContext {
++        actor: MutationActor::System,
++        request_id: "guard-test".to_owned(),
++    };
++    let op = Uuid::new_v4();
++    let before = store
++        .poolguard_control(
++            command("acct_guard", op, PoolGuardAction::Inspect, None),
++            &context,
++        )
++        .await
++        .unwrap();
++    assert_eq!(before.state, PoolGuardIsolation::None);
++    let isolated = store
++        .poolguard_control(
++            command(
++                "acct_guard",
++                op,
++                PoolGuardAction::Disable,
++                Some(before.control_version),
++            ),
++            &context,
++        )
++        .await
++        .unwrap();
++    assert!(!isolated.enabled);
++    let replay = store
++        .poolguard_control(
++            command(
++                "acct_guard",
++                op,
++                PoolGuardAction::Disable,
++                Some(before.control_version),
++            ),
++            &context,
++        )
++        .await
++        .unwrap();
++    assert_eq!(replay.control_version, isolated.control_version);
++    // 额度观测不会改变启停归属，重启后创建的新 Store 也能读取同一回执。
++    sqlx::query("update provider_accounts set updated_at = now() where id = 'acct_guard'")
++        .execute(&db.pool)
++        .await
++        .unwrap();
++    let restored = admin_account_store(&db.pool)
++        .poolguard_control(
++            command("acct_guard", op, PoolGuardAction::Restore, None),
++            &context,
++        )
++        .await
++        .unwrap();
++    assert!(restored.enabled);
++    let replay = store
++        .poolguard_control(
++            command("acct_guard", op, PoolGuardAction::Restore, None),
++            &context,
++        )
++        .await
++        .unwrap();
++    assert_eq!(replay.control_version, restored.control_version);
++    assert!(
++        store
++            .poolguard_control(
++                command(
++                    "acct_guard",
++                    op,
++                    PoolGuardAction::Disable,
++                    Some(restored.control_version)
++                ),
++                &context
++            )
++            .await
++            .is_err()
++    );
++
++    let op = Uuid::new_v4();
++    store
++        .poolguard_control(
++            command(
++                "acct_guard",
++                op,
++                PoolGuardAction::Disable,
++                Some(restored.control_version),
++            ),
++            &context,
++        )
++        .await
++        .unwrap();
++    store
++        .batch_update_accounts(
++            BatchUpdateAccounts {
++                account_ids: vec!["acct_guard".to_owned()],
++                enabled: Some(false),
++                concurrency_limit: None,
++                weight: None,
++                model_access: None,
++                group_ids: None,
++                outbound_proxy: None,
++            },
++            &context,
++        )
++        .await
++        .unwrap();
++    let state = store
++        .poolguard_control(
++            command("acct_guard", op, PoolGuardAction::Inspect, None),
++            &context,
++        )
++        .await
++        .unwrap();
++    assert_eq!(state.state, PoolGuardIsolation::Conflict);
++    assert!(
++        store
++            .poolguard_control(
++                command("acct_guard", op, PoolGuardAction::Restore, None),
++                &context
++            )
++            .await
++            .is_err()
++    );
++    let enabled: bool =
++        sqlx::query_scalar("select enabled from provider_accounts where id = 'acct_guard'")
++            .fetch_one(&db.pool)
++            .await
++            .unwrap();
++    assert!(!enabled);
++    db.close().await;
++}
++
++#[tokio::test]
++async fn poolguard_stale_probes_and_missing_receipts_cannot_change_accounts() {
++    let Some(db) = TestDatabase::create("poolguard_conflicts").await else {
++        return;
++    };
++    let repo = PgProviderAccountRepository::new(db.pool.clone());
++    repo.insert_provider_account(account("acct_guard", "guard-user"))
++        .await
++        .unwrap();
++    let store = admin_account_store(&db.pool);
++    let context = MutationContext {
++        actor: MutationActor::System,
++        request_id: "guard-test".to_owned(),
++    };
++    let op = Uuid::new_v4();
++    assert!(
++        store
++            .poolguard_control(
++                command("acct_guard", op, PoolGuardAction::Disable, Some(999)),
++                &context
++            )
++            .await
++            .is_err()
++    );
++    store
++        .poolguard_control(
++            command("acct_guard", op, PoolGuardAction::Disable, Some(0)),
++            &context,
++        )
++        .await
++        .unwrap();
++    // 审计过期时宁可保持隔离，不能把缺失记录解释为允许恢复。
++    sqlx::query("delete from admin_audit_events where id = $1")
++        .bind(format!("poolguard:{op}:disable"))
++        .execute(&db.pool)
++        .await
++        .unwrap();
++    let state = store
++        .poolguard_control(
++            command("acct_guard", op, PoolGuardAction::Inspect, None),
++            &context,
++        )
++        .await
++        .unwrap();
++    assert_eq!(state.state, PoolGuardIsolation::Conflict);
++    assert!(
++        store
++            .poolguard_control(
++                command("acct_guard", op, PoolGuardAction::Restore, None),
++                &context
++            )
++            .await
++            .is_err()
++    );
++    db.close().await;
++}
+diff --git a/docs/api.md b/docs/api.md
+index 5e20902c..278c3115 100644
+--- a/docs/api.md
++++ b/docs/api.md
+@@ -11,6 +11,7 @@
+ | 账号与授权范围 | [账号](#5-账号) · [代理](#独立代理管理--managed-proxies) · [分组](#6-账号分组) · [Client Key](#7-client-key) |
+ | 系统与运维 | [健康检查](#2-健康检查) · [运行设置](#8-运行设置) · [备份](#9-备份) · [统计与诊断](#10-dashboard用量与错误) · [版本与更新](#11-版本更新与重启) |
+ | 插件 | [安装包与来源](#安装包与来源) · [运行实例](#121-运行实例) · [管理扩展](#122-管理扩展页面与原始-api) |
++| PoolGuard 本地扩展 | [指定账号答题、自动隔离与恢复](poolguard.md) |
+ 
+ ## 1. 鉴权与公共约定
+ 
+diff --git a/docs/poolguard.md b/docs/poolguard.md
+new file mode 100644
+index 00000000..a2e7dac9
+--- /dev/null
++++ b/docs/poolguard.md
+@@ -0,0 +1,43 @@
++# PoolGuard 接入
++
++此本地扩展为 PoolGuard 提供指定账号的自定义答题和可重试隔离，不需要插件。题库、评分、检测周期和连续通过／失败次数由 PoolGuard 管理。所有入口使用 CPR 原有管理员认证，账号凭据不返回给 PoolGuard。
++
++## 自定义答题
++
++`POST /api/admin/accounts/poolguard/probe`
++
++```json
++{"accountId":"acct_example","model":"目标模型","prompt":"计算 17 × 24，只返回整数。"}
++```
++
++题目限 16384 字节，模型名限 256 字节；不接受标准答案等额外字段。复用 Provider 的诊断请求构建和 Core 的固定账号执行链，停用账号也可测试，不临时启用、不切换其他账号，保留账号并发与请求间隔限制。模型使用现有诊断默认参数。
++
++成功返回标准管理 envelope，`data` 包含 `accountId`、`model`、`text`、`completed: true` 和字符串 `controlVersion`。控制版本在答题前读取。答题超时（45 秒）、上游错误、空回答或回答超过 64 KiB 均返回错误，不能作为答错。回答模型字段表示请求目标，不证明上游实际模型身份。原有 `GET /api/admin/accounts/connection-test` 保持固定题目。
++
++## 隔离与恢复
++
++`POST /api/admin/accounts/poolguard/control`
++
++```json
++{"accountId":"acct_example","operationId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","action":"disable","expectedControlVersion":"12"}
++```
++
++- `operationId` 是调用方在发送前持久化的非空 UUID；同一次隔离及其恢复使用相同 ID，下一次隔离换新 ID。
++- `disable` 必须携带答题返回的 `expectedControlVersion`。账号必须启用，且该版本仍有效。
++- `inspect`、`restore` 不接受 `expectedControlVersion`。恢复必须匹配当前隔离回执，不能启用手工停用账号。
++- 返回 `accountId`、`operationId`、`enabled`、`controlVersion` 和 `state`：`none`、`isolated`、`restored` 或 `conflict`。
++- 写入冲突返回 HTTP 409；`inspect` 用 `conflict` 表示已有其他启停操作或隔离回执失效。调用方应停止自动修改，等待人工确认。
++
++启停和审计回执在同一个 PostgreSQL 事务中提交，随后通知 Provider 并发布运行配置。同一操作可重试；请求超时后用 `inspect` 确认结果。只修改 `enabled`，保留额度、凭据、冷却、权重、分组和代理事实，恢复启用不承诺上游立即可用。
++
++回执保存在 CPR 现有管理审计表，遵循审计保留期。回执过期时，仍停用的账号不能自动恢复，应从 PoolGuard 手工确认恢复。普通额度更新与 token 刷新不使回执失效。
++
++CPR 原有批量启停审计不记录完整账号清单，因此批量启停，以及带启停设置的同 Provider 批量导入，会保守地使相关隔离回执失效。这可能暂停未被实际修改账号的自动管控，目的是不覆盖无法精确归属的人工操作。对受管账号宜从 PoolGuard 操作，必要的 CPR 批量操作后查看暂停日志。
++
++## 跟随官方更新
++
++扩展代码集中在 Admin model／use case、API accounts、Store provider_accounts 的 `poolguard.rs` 中；原文件只增加模块声明和端口转发。不修改 Core、Provider、前端、依赖或 CPR 数据库迁移。
++
++保留本地扩展后正常合并官方代码，重点检查 `AccountsService`、`AccountStore`、账号诊断合同和启停审计是否变化。PoolGuard 仓库的 `integrations/cpr/poolguard.patch` 保存可重放补丁，`Apply-CprPoolGuard.ps1` 可检查并应用；上下文不匹配时停止，不能强行覆盖官方代码。切回没有扩展的官方二进制会失去检测入口，PoolGuard 将记录 HTTP 404 并停止本轮自动启停。
++
++验收需覆盖指定账号答题、停用期间复检、HTTP 错误、人工同值停用、重复请求、响应丢失、审计过期及重启后回执查询。测试账号必须与业务账号隔离。
