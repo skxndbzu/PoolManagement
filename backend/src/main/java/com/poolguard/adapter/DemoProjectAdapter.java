@@ -18,6 +18,10 @@ public class DemoProjectAdapter implements ProjectAdapter {
     public String projectCode() { return code; }
     public boolean enabled() { return true; }
     public String capability() { return "演示：模拟回答与调度状态，不访问真实账号"; }
+    public List<String> refreshModels(String id) {
+        if (!states.containsKey(id)) throw new AdapterException("演示账号不存在");
+        return List.of("demo-model", "demo-model-fast", "demo-model-reasoning");
+    }
     public List<ExternalAccount> listAccounts() {
         return states.entrySet().stream().sorted(Map.Entry.comparingByKey()).map(e ->
             new ExternalAccount(e.getKey(), e.getKey() + "@example.test", "demo-model", e.getValue())).toList();

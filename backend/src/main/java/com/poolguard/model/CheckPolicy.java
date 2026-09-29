@@ -28,6 +28,11 @@ public class CheckPolicy {
     @Column(name = "expected_answer", nullable = false, columnDefinition = "TEXT")
     private String expectedAnswer;
 
+    @jakarta.persistence.Enumerated(jakarta.persistence.EnumType.STRING)
+    @Column(name = "match_mode", nullable = false, length = 16)
+    @Builder.Default
+    private MatchMode matchMode = MatchMode.FUZZY;
+
     @Column(name = "capability_tag", nullable = false)
     private String capabilityTag;
 

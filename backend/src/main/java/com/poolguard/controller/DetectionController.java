@@ -6,6 +6,10 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.format.annotation.DateTimeFormat;
+import java.time.OffsetDateTime;
+import com.poolguard.model.RunStatus;
 
 import java.util.List;
 
@@ -29,4 +33,18 @@ public class DetectionController {
 
     @GetMapping
     public List<RunDtos.RunResponse> history() { return detectionService.history(); }
+
+    @GetMapping("/search")
+    public RunDtos.RunPage search(
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "20") int pageSize,
+            @RequestParam(required = false) RunStatus status,
+            @RequestParam(required = false) String triggerType,
+            @RequestParam(required = false) String project,
+            @RequestParam(required = false) String account,
+            @RequestParam(required = false) String outcome,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime from,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) OffsetDateTime to) {
+        return detectionService.search(page, pageSize, status, triggerType, project, account, outcome, from, to);
+    }
 }

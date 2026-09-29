@@ -44,6 +44,14 @@ public class DetectionRun {
     @Builder.Default
     private Integer errorAccounts = 0;
 
+    @Column(name = "planned_checks")
+    @Builder.Default
+    private Long plannedChecks = 0L;
+
+    @Column(name = "completed_checks")
+    @Builder.Default
+    private Long completedChecks = 0L;
+
     @Column(name = "started_at", nullable = false)
     private OffsetDateTime startedAt;
 

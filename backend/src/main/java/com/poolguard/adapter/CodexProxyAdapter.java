@@ -20,6 +20,18 @@ public class CodexProxyAdapter extends AbstractHttpProjectAdapter {
     @Override protected int successCode() { return 200; }
     public String projectCode() { return "codex-proxy-rs"; }
     public String capability() { return "支持自定义题目、停用账号复检及隔离回执；需部署 CPR PoolGuard 扩展"; }
+    @Override public List<String> refreshModels(String id) {
+        var data = json(HttpMethod.POST, "/api/admin/accounts/models/refresh", Map.of("accountId", id));
+        var items = data.path("models");
+        if (!items.isArray() || items.size() > 500)
+            throw new AdapterException("CPR 模型目录格式无效或超过 500 个模型");
+        var models = new LinkedHashSet<String>();
+        for (var item : items) {
+            if (!item.path("id").isTextual()) throw new AdapterException("CPR 模型目录缺少模型 ID");
+            models.add(item.path("id").asText());
+        }
+        return List.copyOf(models);
+    }
     @Override public Answer ask(String id, String model, String question) {
         long started = System.nanoTime();
         var data = json(HttpMethod.POST, "/api/admin/accounts/poolguard/probe",
@@ -51,8 +63,16 @@ public class CodexProxyAdapter extends AbstractHttpProjectAdapter {
         var data = json(HttpMethod.POST, "/api/admin/accounts/poolguard/control", body);
         if (!id.equals(data.path("accountId").asText()) || !operationId.equals(data.path("operationId").asText()))
             throw new AdapterException("CPR 隔离回执与请求不匹配");
-        try { return IsolationState.valueOf(data.path("state").asText().toUpperCase(Locale.ROOT)); }
+        IsolationState state;
+        try { state = IsolationState.valueOf(data.path("state").asText().toUpperCase(Locale.ROOT)); }
         catch (IllegalArgumentException e) { throw new AdapterException("CPR 隔离回执状态无效"); }
+        if (!data.path("enabled").isBoolean() || !data.path("controlVersion").asText("").matches("[0-9]+"))
+            throw new AdapterException("CPR 隔离回执缺少启停状态或控制版本");
+        boolean enabled = data.path("enabled").asBoolean();
+        if ((state == IsolationState.ISOLATED && enabled)
+                || ((state == IsolationState.RESTORED || state == IsolationState.NONE) && !enabled))
+            throw new AdapterException("CPR 隔离回执与实际启停状态矛盾");
+        return state;
     }
     public List<ExternalAccount> listAccounts() {
         var accounts = new ArrayList<ExternalAccount>();

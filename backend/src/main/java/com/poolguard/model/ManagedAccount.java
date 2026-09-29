@@ -43,6 +43,33 @@ public class ManagedAccount {
     @Column(nullable = false)
     private String model;
 
+    @Column(name = "detection_models", columnDefinition = "TEXT")
+    private String detectionModels;
+
+    @Column(name = "upstream_models", columnDefinition = "TEXT")
+    private String upstreamModels;
+
+    @Column(name = "models_synced_at")
+    private OffsetDateTime modelsSyncedAt;
+
+    public java.util.List<String> modelsFromUpstream() {
+        return upstreamModels == null || upstreamModels.isBlank()
+            ? java.util.List.of() : java.util.List.of(upstreamModels.split("\n"));
+    }
+
+    public boolean canRetestModel(String modelId) {
+        return modelsToDetect().contains(modelId) || modelsFromUpstream().contains(modelId);
+    }
+
+    @Column(name = "remote_enabled", nullable = false)
+    @Builder.Default
+    private Boolean remoteEnabled = true;
+
+    public java.util.List<String> modelsToDetect() {
+        return detectionModels == null || detectionModels.isBlank()
+            ? java.util.List.of(model) : java.util.List.of(detectionModels.split("\n"));
+    }
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private AccountStatus status;

@@ -7,6 +7,9 @@ public interface ProjectAdapter {
     boolean enabled();
     String capability();
     List<ExternalAccount> listAccounts();
+    default List<String> refreshModels(String externalId) {
+        throw new AdapterException("该项目暂不支持拉取账号模型目录");
+    }
     Answer ask(String externalId, String model, String question);
     void setSchedulable(String externalId, boolean enabled);
     default boolean supportsIsolationReceipts() { return false; }

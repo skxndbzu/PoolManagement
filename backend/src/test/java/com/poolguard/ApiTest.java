@@ -41,9 +41,16 @@ class ApiTest {
             .content("{\"title\":\"custom question\",\"answer\":\"custom answer\",\"model\":\"reasoning\"}"))
             .andExpect(status().isOk()).andReturn();
         String id=mapper.readTree(created.getResponse().getContentAsString()).path("id").asText();
+        org.assertj.core.api.Assertions.assertThat(mapper.readTree(created.getResponse().getContentAsString()).path("matchMode").asText()).isEqualTo("FUZZY");
+        mvc.perform(put("/api/check-policies/"+id).header("Authorization",auth).contentType(MediaType.APPLICATION_JSON)
+            .content("{\"title\":\"new question\",\"answer\":\"new answer\",\"model\":\"reasoning\",\"matchMode\":\"EXACT\"}"))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.version").value(2)).andExpect(jsonPath("$.matchMode").value("EXACT"));
         mvc.perform(put("/api/check-policies/"+id).header("Authorization",auth).contentType(MediaType.APPLICATION_JSON)
             .content("{\"title\":\"new question\",\"answer\":\"new answer\",\"model\":\"reasoning\"}"))
-            .andExpect(status().isOk()).andExpect(jsonPath("$.version").value(2));
+            .andExpect(status().isOk()).andExpect(jsonPath("$.matchMode").value("EXACT"));
+        mvc.perform(post("/api/check-policies").header("Authorization",auth).contentType(MediaType.APPLICATION_JSON)
+            .content("{\"title\":\"bad mode\",\"answer\":\"21\",\"model\":\"test\",\"matchMode\":\"UNKNOWN\"}"))
+            .andExpect(status().isBadRequest());
         mvc.perform(delete("/api/check-policies/"+id).header("Authorization",auth)).andExpect(status().isOk());
         // 批量保存失败必须整体回滚，不能留下半套问题集。
         var before=mvc.perform(get("/api/check-policies").header("Authorization",auth)).andReturn().getResponse().getContentAsString();
@@ -54,6 +61,11 @@ class ApiTest {
         mvc.perform(put("/api/check-policies").header("Authorization",auth).contentType(MediaType.APPLICATION_JSON)
             .content("[{\"policy\":{\"title\":\"\",\"answer\":\"yes\",\"model\":\"test\"}}]"))
             .andExpect(status().isBadRequest());
+        String batch="[{\"policy\":{\"title\":\"fuzzy question\",\"answer\":\"21\",\"model\":\"test\"}},{\"policy\":{\"title\":\"exact question\",\"answer\":\"8\",\"model\":\"test\",\"matchMode\":\"EXACT\"}}]";
+        mvc.perform(put("/api/check-policies").header("Authorization",auth).contentType(MediaType.APPLICATION_JSON).content(batch))
+            .andExpect(status().isOk()).andExpect(jsonPath("$[0].matchMode").value("FUZZY")).andExpect(jsonPath("$[1].matchMode").value("EXACT"));
+        mvc.perform(get("/api/check-policies").header("Authorization",auth))
+            .andExpect(status().isOk()).andExpect(jsonPath("$[0].matchMode").value("FUZZY")).andExpect(jsonPath("$[1].matchMode").value("EXACT"));
         mvc.perform(post("/api/auth/logout").header("Authorization",auth)).andExpect(status().isOk());
         mvc.perform(get("/api/settings").header("Authorization",auth)).andExpect(status().isUnauthorized());
     }

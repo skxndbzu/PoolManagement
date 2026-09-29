@@ -6,7 +6,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import java.util.List;
 import java.util.UUID;
 
-public interface DetectionRunRepository extends JpaRepository<DetectionRun, UUID> {
+public interface DetectionRunRepository extends JpaRepository<DetectionRun, UUID>, org.springframework.data.jpa.repository.JpaSpecificationExecutor<DetectionRun> {
     List<DetectionRun> findTop20ByOrderByStartedAtDesc();
     java.util.List<DetectionRun> findByStatus(com.poolguard.model.RunStatus status);
 }

@@ -18,6 +18,11 @@ public final class RunDtos {
         int errors,
         String errorMessage,
         OffsetDateTime startedAt,
-        OffsetDateTime finishedAt
+        OffsetDateTime finishedAt,
+        long durationMs,
+        Long plannedChecks,
+        Long completedChecks
     ) {}
+
+    public record RunPage(java.util.List<RunResponse> items, long total, int page, int pageSize, int totalPages) {}
 }

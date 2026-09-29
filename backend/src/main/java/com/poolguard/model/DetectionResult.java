@@ -31,6 +31,9 @@ public class DetectionResult {
     @Column(name = "policy_id")
     private UUID policyId;
 
+    @Column(name = "model", length = 200)
+    private String model;
+
     @Column(nullable = false)
     private Boolean passed;
 
@@ -43,6 +46,10 @@ public class DetectionResult {
 
     @Column(name = "expected_answer", columnDefinition = "TEXT")
     private String expectedAnswer;
+
+    @jakarta.persistence.Enumerated(jakarta.persistence.EnumType.STRING)
+    @Column(name = "match_mode", length = 16)
+    private MatchMode matchMode;
 
     @Column(nullable = false)
     private Integer score;

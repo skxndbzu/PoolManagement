@@ -8,6 +8,7 @@ import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -39,8 +40,18 @@ public class AccountController {
 
     @PostMapping("/{id}/actions")
     public Object action(@PathVariable UUID id, @Valid @RequestBody AccountDtos.AccountActionRequest request) {
-        if ("retest".equals(request.action())) return detectionService.startOne(id);
+        if ("retest".equals(request.action())) return detectionService.startOne(id, request.model());
         return accountService.action(id, request);
+    }
+
+    @PutMapping("/{id}/models")
+    public AccountDtos.AccountResponse models(@PathVariable UUID id, @Valid @RequestBody AccountDtos.DetectionModelsRequest request) {
+        return accountService.updateModels(id, request);
+    }
+
+    @PostMapping("/{id}/models/sync")
+    public AccountDtos.AccountResponse syncModels(@PathVariable UUID id) {
+        return accountService.syncModels(id);
     }
 
     @PostMapping("/sync")

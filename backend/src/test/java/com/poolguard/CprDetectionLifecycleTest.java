@@ -28,10 +28,17 @@ class CprDetectionLifecycleTest {
     @Autowired ManagedAccountRepository accounts;
     @Autowired DetectionRunRepository runs;
     @Autowired CheckPolicyRepository policies;
+    @Autowired SettingsService settings;
+    @Autowired OperationLock lock;
     @MockitoSpyBean(name="demoCodexProxy") ProjectAdapter adapter;
 
     @Test void receiptsFailuresRecoveryAndManualOverride(CapturedOutput output) {
+        settings.update(new com.poolguard.dto.SettingsDtos.SettingsRequest(5, "minutes", 2));
         service.sync();
+        // 本测试验证可配置的批量检测阈值；手动单账号复检始终一次失败即隔离。
+        for (var item : accounts.findAll()) {
+            item.setMonitoring(item.getId().equals(account().getId())); accounts.save(item);
+        }
         doReturn(true).when(adapter).supportsIsolationReceipts();
         doReturn(new ProjectAdapter.Answer("wrong",1,"12")).when(adapter).ask(eq("demo-good"),anyString(),anyString());
         doNothing().when(adapter).isolate(eq("demo-good"),anyString(),eq("12"));
@@ -99,7 +106,10 @@ class CprDetectionLifecycleTest {
     }
     private ManagedAccount account() { return accounts.findByProjectCodeAndExternalAccountId("codex-proxy-rs","demo-good").orElseThrow(); }
     private void check() {
-        UUID id=detection.startOne(account().getId()).id();
+        UUID id=detection.startNow("MANUAL").id();
         await().atMost(Duration.ofSeconds(10)).until(()->runs.findById(id).orElseThrow().getStatus()!=RunStatus.RUNNING);
+        // 终态先入库，随后才释放执行锁；下一轮必须等待清理完成。
+        await().atMost(Duration.ofSeconds(10)).ignoreException(org.springframework.web.server.ResponseStatusException.class)
+            .until(() -> { try (var lease = lock.acquire()) { lease.assertHeld(); return true; } });
     }
 }

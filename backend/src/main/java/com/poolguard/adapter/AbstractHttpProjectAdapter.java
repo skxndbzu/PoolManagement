@@ -17,7 +17,8 @@ abstract class AbstractHttpProjectAdapter implements ProjectAdapter {
     protected AbstractHttpProjectAdapter(ObjectMapper mapper, String url, String key, boolean enabled, String model) {
         var factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(5000);
-        factory.setReadTimeout(60000);
+        // 留出响应处理余量，避免先于 CPR 的 180 秒答题期限中断请求。
+        factory.setReadTimeout(200000);
         this.client = RestClient.builder().baseUrl(url).requestFactory(factory)
             .defaultHeader("x-api-key", key).build();
         this.mapper = mapper;

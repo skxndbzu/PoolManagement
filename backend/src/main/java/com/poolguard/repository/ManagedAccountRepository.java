@@ -16,7 +16,8 @@ public interface ManagedAccountRepository extends JpaRepository<ManagedAccount, 
           and (cast(:search as string) is null or lower(a.emailMasked) like lower(concat('%', cast(:search as string), '%'))
                or lower(a.externalAccountId) like lower(concat('%', cast(:search as string), '%'))
                or lower(a.projectCode) like lower(concat('%', cast(:search as string), '%'))
-               or lower(a.model) like lower(concat('%', cast(:search as string), '%')))
+               or lower(a.model) like lower(concat('%', cast(:search as string), '%'))
+               or lower(a.detectionModels) like lower(concat('%', cast(:search as string), '%')))
         order by a.updatedAt desc
         """)
     List<ManagedAccount> search(String project, String search);

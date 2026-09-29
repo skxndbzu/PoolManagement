@@ -30,7 +30,7 @@ public class SettingsService {
     public SettingsDtos.SettingsResponse get() {
         int value = intValue(SCHEDULE_VALUE, 5);
         String unit = stringValue(SCHEDULE_UNIT, "minutes");
-        int restorePasses = intValue(RESTORE_PASSES, 2);
+        int restorePasses = intValue(RESTORE_PASSES, 1);
         OffsetDateTime nextRun = nextRunAt();
         return new SettingsDtos.SettingsResponse(value, unit, restorePasses, nextRun);
     }

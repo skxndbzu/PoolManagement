@@ -30,6 +30,7 @@ public class AccountSyncService {
                             .monitoring(item.schedulable()).checkCount(0).score(0).build());
                     account.setEmailMasked(item.email());
                     account.setModel(item.model());
+                    account.setRemoteEnabled(item.schedulable());
                     account.setSourcePresent(true);
                     // 外部手工停用的账号不取得自动恢复所有权。
                     if (!item.schedulable() && !account.getDisabledByGuard() && account.getGuardOperationId() == null) {

@@ -2,6 +2,7 @@ package com.poolguard.service;
 
 import com.poolguard.dto.PolicyDtos;
 import com.poolguard.model.CheckPolicy;
+import com.poolguard.model.MatchMode;
 import com.poolguard.repository.CheckPolicyRepository;
 import jakarta.transaction.Transactional;
 import org.springframework.http.HttpStatus;
@@ -34,7 +35,8 @@ public class PolicyService {
     public PolicyDtos.PolicyResponse create(PolicyDtos.PolicyRequest request) {
         return change(() -> {
         validateAnswer(request.answer());
-        CheckPolicy policy = new CheckPolicy(UUID.randomUUID(), request.title(), request.answer(), request.model(),
+        CheckPolicy policy = new CheckPolicy(UUID.randomUUID(), request.title(), request.answer(),
+            request.matchMode() == null ? MatchMode.FUZZY : request.matchMode(), request.model(),
             request.sortOrder() == null ? repository.findAll().size() + 1 : request.sortOrder(),
             request.active() == null || request.active(), 1, now(), now());
         return toResponse(repository.save(policy));
@@ -48,6 +50,7 @@ public class PolicyService {
             .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "检测策略不存在"));
         policy.setTitle(request.title());
         policy.setExpectedAnswer(request.answer());
+        if (request.matchMode() != null) policy.setMatchMode(request.matchMode());
         policy.setCapabilityTag(request.model());
         if (request.sortOrder() != null) policy.setSortOrder(request.sortOrder());
         if (request.active() != null) policy.setActive(request.active());
@@ -83,6 +86,7 @@ public class PolicyService {
                     : repository.findById(item.id()).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "检测策略不存在"));
                 if (!keep.add(policy.getId())) throw new IllegalArgumentException("问题集包含重复 ID");
                 policy.setTitle(request.title()); policy.setExpectedAnswer(request.answer());
+                if (request.matchMode() != null) policy.setMatchMode(request.matchMode());
                 policy.setCapabilityTag(request.model()); policy.setSortOrder(order++);
                 policy.setActive(request.active() == null || request.active());
                 policy.setVersion(policy.getVersion() + 1); policy.setUpdatedAt(now());
@@ -107,7 +111,7 @@ public class PolicyService {
 
     private PolicyDtos.PolicyResponse toResponse(CheckPolicy policy) {
         return new PolicyDtos.PolicyResponse(policy.getId(), policy.getTitle(), policy.getExpectedAnswer(),
-            policy.getCapabilityTag(), policy.getSortOrder(), Boolean.TRUE.equals(policy.getActive()), policy.getVersion());
+            policy.getCapabilityTag(), policy.getSortOrder(), Boolean.TRUE.equals(policy.getActive()), policy.getVersion(), policy.getMatchMode());
     }
 
     private OffsetDateTime now() { return OffsetDateTime.now(ZoneOffset.UTC); }

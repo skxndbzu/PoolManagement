@@ -24,10 +24,23 @@ public final class AccountDtos {
         boolean sourcePresent,
         boolean disabledByGuard,
         int passStreak,
-        String failureReason
+        String failureReason,
+        boolean enabled,
+        java.util.List<String> detectionModels,
+        java.util.List<String> upstreamModels,
+        OffsetDateTime modelsSyncedAt
     ) {}
 
-    public record AccountActionRequest(String action) {}
+    public record AccountActionRequest(String action, String model) {
+        public AccountActionRequest(String action) { this(action, null); }
+    }
+
+    public record DetectionModelsRequest(
+        @jakarta.validation.constraints.NotEmpty
+        @jakarta.validation.constraints.Size(max = 20)
+        java.util.List<@jakarta.validation.constraints.NotBlank
+            @jakarta.validation.constraints.Size(max = 200) String> models
+    ) {}
 
     public record AccountSummary(
         long total,

@@ -159,10 +159,10 @@ index ebca86ab..d3926de0 100644
  pub mod system;
 diff --git a/backend/crates/gateway-admin/src/use_case/poolguard.rs b/backend/crates/gateway-admin/src/use_case/poolguard.rs
 new file mode 100644
-index 00000000..8b83173f
+index 00000000..5dcd6b50
 --- /dev/null
 +++ b/backend/crates/gateway-admin/src/use_case/poolguard.rs
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,117 @@
 +//! 隔离的 PoolGuard 用例；复用诊断执行、账号事务、Provider 通知及配置发布。
 +
 +use super::{map_provider_error, map_store_error, publish_committed};
@@ -177,6 +177,7 @@ index 00000000..8b83173f
 +};
 +use gateway_core::{
 +    engine::probe::{AccountProbe, AccountProbeRequest},
++    event::FinishReason,
 +    runtime::SnapshotControl,
 +};
 +use std::time::Duration;
@@ -212,7 +213,7 @@ index 00000000..8b83173f
 +        .await
 +        .map_err(|error| map_provider_error(error, "poolguard probe"))?;
 +    let result = tokio::time::timeout(
-+        Duration::from_secs(45),
++        Duration::from_secs(180),
 +        probe.probe(
 +            AccountProbeRequest {
 +                account_id: request.account_id,
@@ -229,6 +230,12 @@ index 00000000..8b83173f
 +        tracing::warn!(source = ?error.source(), kind = ?error.kind(), "PoolGuard 账号答题异常");
 +        AdminError::bad_gateway("账号答题失败，不能作为能力不达标")
 +    })?;
++    // 流结束不等于答案完整：长度截断、过滤、工具调用及未知终态均不参与判分。
++    if result.finish_reason != Some(FinishReason::Stop) {
++        return Err(AdminError::bad_gateway(
++            "账号回答未正常完成，不能作为能力不达标",
++        ));
++    }
 +    let size = result
 +        .text
 +        .iter()
@@ -274,7 +281,7 @@ index 00000000..8b83173f
 +    Ok(result)
 +}
 diff --git a/backend/crates/gateway-admin/tests/use_case/accounts.rs b/backend/crates/gateway-admin/tests/use_case/accounts.rs
-index f03a2e64..6ee8a862 100644
+index f03a2e64..93f75f5a 100644
 --- a/backend/crates/gateway-admin/tests/use_case/accounts.rs
 +++ b/backend/crates/gateway-admin/tests/use_case/accounts.rs
 @@ -686,6 +686,25 @@ impl FakeAccountStore {
@@ -312,6 +319,26 @@ index f03a2e64..6ee8a862 100644
      provider: Arc<FakeProviderAdmin>,
      store: Arc<FakeAccountStore>,
      probe: Arc<dyn AccountProbe>,
+@@ -3304,6 +3323,7 @@ impl AccountProbe for SuccessfulAccountProbe {
+         Box::pin(async {
+             Ok(AccountProbeResult {
+                 text: vec!["OK".to_owned()],
++                finish_reason: Some(gateway_core::event::FinishReason::Stop),
+             })
+         })
+     }
+diff --git a/backend/crates/gateway-admin/tests/use_case/freeze_recovery.rs b/backend/crates/gateway-admin/tests/use_case/freeze_recovery.rs
+index 8058daae..c5d50973 100644
+--- a/backend/crates/gateway-admin/tests/use_case/freeze_recovery.rs
++++ b/backend/crates/gateway-admin/tests/use_case/freeze_recovery.rs
+@@ -209,6 +209,7 @@ impl AccountProbe for SuccessfulProbe {
+         Box::pin(async {
+             Ok(AccountProbeResult {
+                 text: vec!["OK".to_owned()],
++                finish_reason: Some(gateway_core::event::FinishReason::Stop),
+             })
+         })
+     }
 diff --git a/backend/crates/gateway-admin/tests/use_case/mod.rs b/backend/crates/gateway-admin/tests/use_case/mod.rs
 index 670b069a..9da9a510 100644
 --- a/backend/crates/gateway-admin/tests/use_case/mod.rs
@@ -326,10 +353,10 @@ index 670b069a..9da9a510 100644
  mod system;
 diff --git a/backend/crates/gateway-admin/tests/use_case/poolguard.rs b/backend/crates/gateway-admin/tests/use_case/poolguard.rs
 new file mode 100644
-index 00000000..a1fc290e
+index 00000000..2f2f2aa5
 --- /dev/null
 +++ b/backend/crates/gateway-admin/tests/use_case/poolguard.rs
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,171 @@
 +use super::accounts::{
 +    FakeAccountStore, FakeProviderAdmin, account_record, accounts_service_with_probe, events,
 +};
@@ -339,6 +366,7 @@ index 00000000..a1fc290e
 +    account::ProviderAccountId,
 +    engine::probe::{AccountProbe, AccountProbeError, AccountProbeRequest, AccountProbeResult},
 +    error::{GatewayError, GatewayErrorKind},
++    event::FinishReason,
 +    operation::Operation,
 +    routing::{RuntimeSnapshot, UpstreamModelId},
 +};
@@ -346,6 +374,7 @@ index 00000000..a1fc290e
 +
 +struct AnswerProbe {
 +    answer: Option<String>,
++    finish_reason: Option<FinishReason>,
 +}
 +impl AccountProbe for AnswerProbe {
 +    fn probe(
@@ -367,6 +396,7 @@ index 00000000..a1fc290e
 +            match &self.answer {
 +                Some(answer) => Ok(AccountProbeResult {
 +                    text: vec![answer.clone()],
++                    finish_reason: self.finish_reason,
 +                }),
 +                None => Err(GatewayError::new(GatewayErrorKind::RateLimited, "limited").into()),
 +            }
@@ -385,6 +415,7 @@ index 00000000..a1fc290e
 +        store,
 +        Arc::new(AnswerProbe {
 +            answer: Some("408".to_owned()),
++            finish_reason: Some(FinishReason::Stop),
 +        }),
 +    )
 +    .await;
@@ -402,8 +433,15 @@ index 00000000..a1fc290e
 +    for answer in [None, Some(String::new()), Some("x".repeat(65537))] {
 +        let provider = FakeProviderAdmin::new("openai", events());
 +        let store = FakeAccountStore::new("openai", events());
-+        let services =
-+            accounts_service_with_probe(provider, store, Arc::new(AnswerProbe { answer })).await;
++        let services = accounts_service_with_probe(
++            provider,
++            store,
++            Arc::new(AnswerProbe {
++                answer,
++                finish_reason: Some(FinishReason::Stop),
++            }),
++        )
++        .await;
 +        let result = services.accounts().poolguard_probe(request()).await;
 +        assert!(matches!(result,Err(error) if error.kind()==AdminErrorKind::BadGateway));
 +    }
@@ -413,6 +451,81 @@ index 00000000..a1fc290e
 +        account_id: ProviderAccountId::new("acct_test").unwrap(),
 +        model: UpstreamModelId::new("test-model").unwrap(),
 +        prompt: "17 * 24? Return digits only.".to_owned(),
++    }
++}
++
++#[tokio::test]
++async fn poolguard_rejects_nonempty_answers_without_normal_completion() {
++    for finish_reason in [
++        None,
++        Some(FinishReason::Length),
++        Some(FinishReason::ContentFilter),
++        Some(FinishReason::ToolCall),
++        Some(FinishReason::Other),
++    ] {
++        let services = accounts_service_with_probe(
++            FakeProviderAdmin::new("openai", events()),
++            FakeAccountStore::new("openai", events()),
++            Arc::new(AnswerProbe {
++                // 即使半截文本恰好匹配标准答案，也不能据此判为通过。
++                answer: Some("408".to_owned()),
++                finish_reason,
++            }),
++        )
++        .await;
++        let result = services.accounts().poolguard_probe(request()).await;
++        assert!(
++            matches!(result, Err(error) if error.kind() == AdminErrorKind::BadGateway),
++            "finish_reason={finish_reason:?}"
++        );
++    }
++}
++
++struct PendingProbe;
++
++impl AccountProbe for PendingProbe {
++    fn probe(
++        &self,
++        _: AccountProbeRequest,
++        _: Option<Arc<RuntimeSnapshot>>,
++    ) -> BoxFuture<'_, Result<AccountProbeResult, AccountProbeError>> {
++        Box::pin(std::future::pending())
++    }
++}
++
++#[tokio::test(start_paused = true)]
++async fn poolguard_timeout_is_an_error_and_does_not_change_scheduling() {
++    let recorded = events();
++    let services = accounts_service_with_probe(
++        FakeProviderAdmin::new("openai", recorded.clone()),
++        FakeAccountStore::new("openai", recorded.clone()),
++        Arc::new(PendingProbe),
++    )
++    .await;
++    let started = tokio::time::Instant::now();
++    let result = services.accounts().poolguard_probe(request()).await;
++    assert!(matches!(result, Err(error) if error.kind() == AdminErrorKind::BadGateway));
++    assert_eq!(started.elapsed(), std::time::Duration::from_secs(180));
++    assert!(
++        !recorded.lock().unwrap().iter().any(|event| {
++            event.contains("batch_update") || event.contains("account_unavailable")
++        })
++    );
++}
++
++#[tokio::test]
++async fn poolguard_rejects_invalid_prompts_before_calling_upstream() {
++    let services = accounts_service_with_probe(
++        FakeProviderAdmin::new("openai", events()),
++        FakeAccountStore::new("openai", events()),
++        Arc::new(PendingProbe),
++    )
++    .await;
++    for prompt in [" ".to_owned(), "题".repeat(5462)] {
++        let mut input = request();
++        input.prompt = prompt;
++        let result = services.accounts().poolguard_probe(input).await;
++        assert!(matches!(result, Err(error) if error.kind() == AdminErrorKind::Invalid));
 +    }
 +}
 diff --git a/backend/crates/gateway-api/src/admin/accounts/handlers.rs b/backend/crates/gateway-api/src/admin/accounts/handlers.rs
@@ -441,10 +554,10 @@ index 8fc3cdd0..eb341509 100644
  
 diff --git a/backend/crates/gateway-api/src/admin/accounts/poolguard.rs b/backend/crates/gateway-api/src/admin/accounts/poolguard.rs
 new file mode 100644
-index 00000000..e85e5fd8
+index 00000000..323ae9e9
 --- /dev/null
 +++ b/backend/crates/gateway-api/src/admin/accounts/poolguard.rs
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,141 @@
 +//! PoolGuard 专用管理入口；保留原有 GET connection-test 的固定题目合同。
 +
 +use super::{
@@ -507,6 +620,7 @@ index 00000000..e85e5fd8
 +        })
 +        .await
 +        .map_err(map_service_error)?;
++    // 用例已确认正常结束原因；不完整响应返回错误，不进入此成功分支。
 +    Ok(AdminResponse::new(
 +        StatusCode::OK,
 +        AdminEnvelope::ok(serde_json::json!({
@@ -695,6 +809,160 @@ index 987c6fca..2204a10e 100644
          "tests/admin/accounts/presenter.rs",
          "tests/admin/auth.rs",
          "tests/admin/client_keys.rs",
+diff --git a/backend/crates/gateway-core/src/engine/execution.rs b/backend/crates/gateway-core/src/engine/execution.rs
+index 4f36000d..52dea987 100644
+--- a/backend/crates/gateway-core/src/engine/execution.rs
++++ b/backend/crates/gateway-core/src/engine/execution.rs
+@@ -1949,16 +1949,18 @@ impl DefaultExecutionService {
+                 .observe_probe_failure(&observed, started_at, &error)
+                 .await);
+         }
+-        Ok(AccountProbeResult {
+-            text: events
+-                .into_iter()
+-                .flat_map(|event| event.into_parts().0)
+-                .filter_map(|fact| match fact {
+-                    GatewayEvent::TextDelta(delta) => Some(delta.text),
+-                    _ => None,
+-                })
+-                .collect(),
+-        })
++        let mut result = AccountProbeResult {
++            text: Vec::new(),
++            finish_reason: None,
++        };
++        for fact in events.into_iter().flat_map(|event| event.into_parts().0) {
++            match fact {
++                GatewayEvent::TextDelta(delta) => result.text.push(delta.text),
++                GatewayEvent::Completed(meta) => result.finish_reason = meta.finish_reason(),
++                _ => {}
++            }
++        }
++        Ok(result)
+     }
+ 
+     /// 探测失败先记录脱敏分类事实，再把请求局部的原始上游响应交给认证管理端。
+diff --git a/backend/crates/gateway-core/src/engine/probe.rs b/backend/crates/gateway-core/src/engine/probe.rs
+index a3e0d073..e4eaebf0 100644
+--- a/backend/crates/gateway-core/src/engine/probe.rs
++++ b/backend/crates/gateway-core/src/engine/probe.rs
+@@ -21,6 +21,8 @@ pub struct AccountProbeRequest {
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub struct AccountProbeResult {
+     pub text: Vec<String>,
++    /// 保留 Provider 的规范化结束原因；缺失终态不能推断为正常完成。
++    pub finish_reason: Option<crate::event::FinishReason>,
+ }
+ 
+ /// 仅供当前管理端连接测试展示的原始上游失败响应。
+diff --git a/backend/crates/gateway-core/tests/engine/execution.rs b/backend/crates/gateway-core/tests/engine/execution.rs
+index 8f69aea3..a872b050 100644
+--- a/backend/crates/gateway-core/tests/engine/execution.rs
++++ b/backend/crates/gateway-core/tests/engine/execution.rs
+@@ -3214,6 +3214,103 @@ impl Provider for FailingProvider {
+     }
+ }
+ 
++struct ProbeTerminalProvider {
++    finish_reason: Option<gateway_core::event::FinishReason>,
++}
++
++#[async_trait]
++impl Provider for ProbeTerminalProvider {
++    fn name(&self) -> &'static str {
++        "openai"
++    }
++
++    fn catalog_generation(&self) -> ProviderCatalogGeneration {
++        ProviderCatalogGeneration::default()
++    }
++
++    async fn query_model_capabilities(
++        &self,
++    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
++        Ok(Vec::new())
++    }
++
++    async fn execute(
++        self: Arc<Self>,
++        request: ProviderRequest,
++        _: AttemptContext,
++    ) -> Result<ProviderStream, ProviderError> {
++        let candidate = request.candidate();
++        let metadata = ProviderCallMetadata::new(
++            candidate.provider().clone(),
++            candidate.upstream_model().unwrap().clone(),
++            ProviderAccountId::new("acct_probe").unwrap(),
++            UpstreamTransport::new("http_sse").unwrap(),
++        );
++        let started = ResponseMeta::new("resp_probe", "gpt-probe");
++        let terminal = self.finish_reason.map_or_else(
++            || started.clone(),
++            |reason| started.clone().with_finish_reason(reason),
++        );
++        Ok(ProviderStream::new(
++            metadata,
++            futures::stream::iter([
++                Ok(GatewayEvent::Started(started).into()),
++                Ok(
++                    GatewayEvent::ContentAdded(gateway_core::event::ContentItem::new(
++                        0,
++                        gateway_core::event::ContentKind::Text,
++                    ))
++                    .into(),
++                ),
++                Ok(GatewayEvent::TextDelta(gateway_core::event::TextDelta {
++                    content_index: 0,
++                    text: "408".to_owned(),
++                })
++                .into()),
++                Ok(GatewayEvent::Completed(terminal).into()),
++            ]),
++            (),
++        ))
++    }
++}
++
++#[test]
++fn account_probe_preserves_terminal_reason_even_when_text_is_present() {
++    use gateway_core::event::FinishReason;
++    for finish_reason in [
++        None,
++        Some(FinishReason::Stop),
++        Some(FinishReason::Length),
++        Some(FinishReason::ContentFilter),
++        Some(FinishReason::ToolCall),
++        Some(FinishReason::Other),
++    ] {
++        let service = DefaultExecutionService::new(
++            RuntimeSnapshotHandle::new(probe_snapshot()),
++            Arc::new(TrackingExecutionStore::default()),
++            ProviderRegistry::new([
++                Arc::new(ProbeTerminalProvider { finish_reason }) as Arc<dyn Provider>
++            ])
++            .unwrap(),
++            Arc::new(UnusedAdmissions),
++            Arc::new(UnusedContinuation),
++            Arc::new(RecordingClientApiKeyUsage::default()),
++        );
++        let result = block_on(service.probe(
++            AccountProbeRequest {
++                account_id: ProviderAccountId::new("acct_probe").unwrap(),
++                provider_kind: ProviderKind::new("openai").unwrap(),
++                upstream_model: UpstreamModelId::new("gpt-probe").unwrap(),
++                operation: probe_operation(),
++            },
++            None,
++        ))
++        .unwrap();
++        assert_eq!(result.text, ["408"]);
++        assert_eq!(result.finish_reason, finish_reason);
++    }
++}
++
+ struct LocalFailingProvider;
+ 
+ #[async_trait]
 diff --git a/backend/crates/gateway-store/src/postgres/provider_accounts/admin_adapter.rs b/backend/crates/gateway-store/src/postgres/provider_accounts/admin_adapter.rs
 index e0fa013f..ce468bed 100644
 --- a/backend/crates/gateway-store/src/postgres/provider_accounts/admin_adapter.rs
@@ -844,10 +1112,10 @@ index 980b03ec..60ac62b7 100644
  
 diff --git a/backend/crates/gateway-store/tests/postgres/provider_accounts/poolguard.rs b/backend/crates/gateway-store/tests/postgres/provider_accounts/poolguard.rs
 new file mode 100644
-index 00000000..6b765c2f
+index 00000000..ddd790c6
 --- /dev/null
 +++ b/backend/crates/gateway-store/tests/postgres/provider_accounts/poolguard.rs
-@@ -0,0 +1,213 @@
+@@ -0,0 +1,289 @@
 +use super::*;
 +use gateway_admin::model::poolguard::*;
 +use uuid::Uuid;
@@ -864,6 +1132,82 @@ index 00000000..6b765c2f
 +        action,
 +        expected_control_version: version,
 +    }
++}
++
++#[tokio::test]
++async fn poolguard_concurrent_isolations_have_one_owner_and_preserve_account_facts() {
++    let Some(db) = TestDatabase::create("poolguard_race").await else {
++        return;
++    };
++    let repo = PgProviderAccountRepository::new(db.pool.clone());
++    for (id, user) in [("acct_guard_a", "user-a"), ("acct_guard_b", "user-b")] {
++        repo.insert_provider_account(account(id, user))
++            .await
++            .unwrap();
++    }
++    let facts = sqlx::query_scalar::<_, serde_json::Value>(
++        "select to_jsonb(a) - 'enabled' - 'updated_at' from provider_accounts a where id = 'acct_guard_a'",
++    ).fetch_one(&db.pool).await.unwrap();
++    let store = admin_account_store(&db.pool);
++    let context = MutationContext {
++        actor: MutationActor::System,
++        request_id: "guard-race".to_owned(),
++    };
++    let first = Uuid::new_v4();
++    let second = Uuid::new_v4();
++    let (a, b) = tokio::join!(
++        store.poolguard_control(
++            command("acct_guard_a", first, PoolGuardAction::Disable, Some(0)),
++            &context
++        ),
++        store.poolguard_control(
++            command("acct_guard_a", second, PoolGuardAction::Disable, Some(0)),
++            &context
++        ),
++    );
++    assert_ne!(a.is_ok(), b.is_ok(), "只能有一个隔离操作成为当前归属");
++    let owner = if a.is_ok() { first } else { second };
++    let other = if a.is_ok() { second } else { first };
++    assert!(
++        store
++            .poolguard_control(
++                command("acct_guard_a", other, PoolGuardAction::Restore, None),
++                &context
++            )
++            .await
++            .is_err()
++    );
++    // 同一操作 ID 不得抢占另一账号，即使其控制版本有效。
++    assert!(
++        store
++            .poolguard_control(
++                command("acct_guard_b", owner, PoolGuardAction::Disable, Some(0)),
++                &context
++            )
++            .await
++            .is_err()
++    );
++    assert!(
++        store
++            .poolguard_control(
++                command("acct_guard_a", owner, PoolGuardAction::Restore, None),
++                &context
++            )
++            .await
++            .unwrap()
++            .enabled
++    );
++    let after = sqlx::query_scalar::<_, serde_json::Value>(
++        "select to_jsonb(a) - 'enabled' - 'updated_at' from provider_accounts a where id = 'acct_guard_a'",
++    ).fetch_one(&db.pool).await.unwrap();
++    assert_eq!(facts, after, "启停不得覆盖凭据、额度及其他账号配置");
++    let untouched: bool =
++        sqlx::query_scalar("select enabled from provider_accounts where id = 'acct_guard_b'")
++            .fetch_one(&db.pool)
++            .await
++            .unwrap();
++    assert!(untouched);
++    db.close().await;
 +}
 +
 +#[tokio::test]
@@ -1075,7 +1419,7 @@ index 5e20902c..278c3115 100644
  
 diff --git a/docs/poolguard.md b/docs/poolguard.md
 new file mode 100644
-index 00000000..a2e7dac9
+index 00000000..32610d1b
 --- /dev/null
 +++ b/docs/poolguard.md
 @@ -0,0 +1,43 @@
@@ -1093,7 +1437,7 @@ index 00000000..a2e7dac9
 +
 +题目限 16384 字节，模型名限 256 字节；不接受标准答案等额外字段。复用 Provider 的诊断请求构建和 Core 的固定账号执行链，停用账号也可测试，不临时启用、不切换其他账号，保留账号并发与请求间隔限制。模型使用现有诊断默认参数。
 +
-+成功返回标准管理 envelope，`data` 包含 `accountId`、`model`、`text`、`completed: true` 和字符串 `controlVersion`。控制版本在答题前读取。答题超时（45 秒）、上游错误、空回答或回答超过 64 KiB 均返回错误，不能作为答错。回答模型字段表示请求目标，不证明上游实际模型身份。原有 `GET /api/admin/accounts/connection-test` 保持固定题目。
++成功返回标准管理 envelope，`data` 包含 `accountId`、`model`、`text`、`completed: true` 和字符串 `controlVersion`。控制版本在答题前读取。只有 Core 探测返回规范化结束原因 `Stop` 且文本非空时才返回成功；`response.incomplete` 对应的长度截断、内容过滤及其他异常结束原因，以及工具调用、缺失结束原因，均返回 HTTP 502，即使文本看起来是正确答案也不判分。答题超时（180 秒）、上游错误、空回答或回答超过 64 KiB 同样返回错误，不能作为答错。调用方读取超时应大于探测执行期限；PoolGuard 使用 200 秒。回答模型字段表示请求目标，不证明上游实际模型身份。原有 `GET /api/admin/accounts/connection-test` 保持固定题目。
 +
 +## 隔离与恢复
 +
@@ -1117,7 +1461,7 @@ index 00000000..a2e7dac9
 +
 +## 跟随官方更新
 +
-+扩展代码集中在 Admin model／use case、API accounts、Store provider_accounts 的 `poolguard.rs` 中；原文件只增加模块声明和端口转发。不修改 Core、Provider、前端、依赖或 CPR 数据库迁移。
++扩展业务代码集中在 Admin model／use case、API accounts、Store provider_accounts 的 `poolguard.rs` 中；现有控制面文件主要增加模块声明和端口转发。Core 的 `AccountProbeResult` 额外保留规范化结束原因，探测执行链将 `Completed` 事件的原因传给调用方；正常完成的判定由 PoolGuard 用例执行。不修改 Provider、前端、依赖或 CPR 数据库迁移。
 +
 +保留本地扩展后正常合并官方代码，重点检查 `AccountsService`、`AccountStore`、账号诊断合同和启停审计是否变化。PoolGuard 仓库的 `integrations/cpr/poolguard.patch` 保存可重放补丁，`Apply-CprPoolGuard.ps1` 可检查并应用；上下文不匹配时停止，不能强行覆盖官方代码。切回没有扩展的官方二进制会失去检测入口，PoolGuard 将记录 HTTP 404 并停止本轮自动启停。
 +
